@@ -76,7 +76,7 @@ def main() -> None:
     )
 
     # Remove needs-fix if present, add approved
-    current_labels = [l.name for l in pr.get_labels()]
+    current_labels = [label.name for label in pr.get_labels()]
     if NEEDS_FIX_LABEL in current_labels:
         pr.remove_from_labels(NEEDS_FIX_LABEL)
     pr.add_to_labels(APPROVED_LABEL)

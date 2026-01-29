@@ -19,7 +19,6 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ secrets.GH_PAT }}
-          persist-credentials: true
 
       - name: Force auth remote
         run: |

@@ -57,4 +57,4 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
-          python agents/reviewer_agent/reviewer.py --pr "${{ github.event.pull_request.number }}"
+          python agents/review_agent/reviewer.py --pr "${{ github.event.pull_request.number }}"

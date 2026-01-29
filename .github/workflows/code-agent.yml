@@ -35,4 +35,4 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
-          python scripts/run_code_agent.py --issue "${{ github.event.issue.number }}"
+          python run_code_agent.py --issue "${{ github.event.issue.number }}"

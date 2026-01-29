@@ -36,7 +36,7 @@ def commit_change(message: str) -> None:
 
 
 def push_branch(branch: str) -> None:
-    sh(["git", "push", "-u", "origin", branch, "--force-with-lease"])
+    sh(["git", "push", "-u", "origin", branch])
 
 
 def get_repo_full_name() -> str:

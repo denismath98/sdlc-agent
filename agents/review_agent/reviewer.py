@@ -5,7 +5,6 @@ from typing import Optional
 
 from github import Github
 
-
 APPROVED_LABEL = "ai:approved"
 NEEDS_FIX_LABEL = "ai:needs-fix"
 
@@ -28,7 +27,9 @@ def ensure_label(repo, name: str, color: str) -> None:
     try:
         repo.get_label(name)
     except Exception:
-        repo.create_label(name=name, color=color, description="Auto label by AI reviewer")
+        repo.create_label(
+            name=name, color=color, description="Auto label by AI reviewer"
+        )
 
 
 def extract_issue_number(pr_body: str) -> Optional[int]:
@@ -46,7 +47,7 @@ def main() -> None:
     repo = gh.get_repo(get_repo_full_name())
     pr = repo.get_pull(args.pr)
 
-    ensure_label(repo, APPROVED_LABEL, "2da44e")   # green
+    ensure_label(repo, APPROVED_LABEL, "2da44e")  # green
     ensure_label(repo, NEEDS_FIX_LABEL, "d1242f")  # red
 
     issue_no = extract_issue_number(pr.body or "")
@@ -64,12 +65,8 @@ def main() -> None:
     review_body = (
         "AI-REVIEW:\n"
         f"status={status}\n"
-        "issues:\n"
-        + "\n".join([f"- {x}" for x in issues])
-        + "\n"
-        "suggestions:\n"
-        + "\n".join([f"- {x}" for x in suggestions])
-        + "\n\n"
+        "issues:\n" + "\n".join([f"- {x}" for x in issues]) + "\n"
+        "suggestions:\n" + "\n".join([f"- {x}" for x in suggestions]) + "\n\n"
         "Context:\n"
         f"- Issue: #{issue_no if issue_no else 'N/A'}\n"
         f"- Issue details length: {len(issue_text)}\n"

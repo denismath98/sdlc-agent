@@ -21,6 +21,11 @@ jobs:
           token: ${{ secrets.GH_PAT }}
           persist-credentials: true
 
+      - name: Force auth remote
+        run: |
+          git remote set-url origin https://x-access-token:${{ secrets.GH_PAT }}@github.com/${{ github.repository }}.git
+          git remote -v
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:

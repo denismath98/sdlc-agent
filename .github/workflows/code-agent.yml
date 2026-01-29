@@ -18,7 +18,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GH_PAT }}
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -32,7 +32,7 @@ jobs:
 
       - name: Run Code Agent
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           python run_code_agent.py --issue "${{ github.event.issue.number }}"

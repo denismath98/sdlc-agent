@@ -19,6 +19,7 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ secrets.GH_PAT }}
+          persist-credentials: true
 
       - name: Setup Python
         uses: actions/setup-python@v5

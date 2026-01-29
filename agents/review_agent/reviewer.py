@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from github import Github
+from agents.llm_client import llm_chat
 
 APPROVED_LABEL = "ai:approved"
 NEEDS_FIX_LABEL = "ai:needs-fix"
@@ -154,6 +155,19 @@ def apply_labels(pr, res: ReviewResult) -> None:
         pr.add_to_labels(NEEDS_FIX_LABEL)
 
 
+def collect_pr_diff(pr, max_chars: int = 20000) -> str:
+    parts: list[str] = []
+    for f in pr.get_files():
+        parts.append(f"FILE: {f.filename}")
+        if f.patch:
+            parts.append(f.patch)
+        parts.append("")  # spacer
+    text = "\n".join(parts)
+    if len(text) > max_chars:
+        return text[:max_chars] + "\n...[TRUNCATED]..."
+    return text
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pr", type=int, required=True)
@@ -167,6 +181,48 @@ def main() -> None:
     ensure_label(repo, NEEDS_FIX_LABEL, "d1242f")  # red
 
     res = evaluate(repo, pr)
+
+    diff_text = collect_pr_diff(pr)
+    issue_text = ""
+    if res.issue_number:
+        issue = repo.get_issue(number=res.issue_number)
+        issue_text = (issue.body or "")[:5000]
+
+    prompt = f"""
+    Issue:
+    {issue_text}
+
+    PR diff:
+    {diff_text}
+
+    Task:
+    Return a strict review in the following format:
+
+    status=approved|needs-fix
+    issues:
+    - ...
+    suggestions:
+    - ...
+
+    Rules:
+    - If changes do not match the Issue, status=needs-fix.
+    - If CI passed but logic seems wrong or missing, status=needs-fix.
+    - Keep it short.
+    """
+
+    try:
+        llm_out = llm_chat(prompt).strip()
+        # примитивный парсинг: если LLM сказал needs-fix — учитываем
+        if "status=needs-fix" in llm_out and res.status == "approved":
+            res.status = "needs-fix"
+            res.issues.append("LLM review: potential mismatch with requirements.")
+            res.suggestions.append("See LLM output in comment.")
+        # добавим LLM вывод в suggestions как артефакт
+        res.suggestions.append("LLM output:")
+        res.suggestions.append(llm_out)
+    except Exception as e:
+        # не ломаем pipeline, если LLM не настроен
+        res.suggestions.append(f"LLM not used: {e}")
 
     body = format_ai_review(res, pr_number=args.pr)
 

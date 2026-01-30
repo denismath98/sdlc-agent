@@ -1,1 +1,1 @@
-# This package contains the wordcount module.
+# This file makes src a package.

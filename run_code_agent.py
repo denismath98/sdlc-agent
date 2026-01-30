@@ -1,37 +1,23 @@
 import argparse
-import json
 import os
 import re
 import subprocess
 from datetime import datetime
-from typing import Optional, Tuple
+from typing import Dict, Tuple
 
 from github import Auth, Github
-
 from agents.llm_client import llm_chat
 
-MAX_ITERATIONS = 3
 AI_DIR = ".ai"
+MAX_ITERATIONS = 3
 
-# Safety rails: do not allow the agent to change dangerous files/paths.
-ALLOWED_PATH_PREFIXES = ("agents/", "tests/", "src/", ".ai/")
-ALLOWED_EXACT = ("README.md",)
-DENY_PATH_PREFIXES = (".github/workflows/",)
-DENY_EXACT = ("pyproject.toml", "docker-compose.yml", "Dockerfile")
 
-MAX_DIFF_CHARS = 12000
-LLM_PREVIEW_CHARS = 500
+# -------------------- utils --------------------
 
 
 def sh(cmd: list[str]) -> str:
     res = subprocess.run(cmd, check=True, text=True, capture_output=True)
     return res.stdout.strip()
-
-
-def safe_branch_name(text: str) -> str:
-    text = (text or "").lower()
-    text = re.sub(r"[^a-z0-9\-_.]+", "-", text).strip("-")
-    return text[:60] if len(text) > 60 else text
 
 
 def ensure_git_identity() -> None:
@@ -40,7 +26,6 @@ def ensure_git_identity() -> None:
 
 
 def maybe_format_with_black() -> str:
-    """Best-effort format. Never fails the agent run."""
     try:
         subprocess.run(
             ["python", "-m", "black", "."],
@@ -53,8 +38,7 @@ def maybe_format_with_black() -> str:
         return f"black: skipped ({e})"
 
 
-def commit_change(message: str) -> bool:
-    """Returns True if commit created, False if nothing to commit."""
+def commit_if_needed(message: str) -> bool:
     sh(["git", "add", "-A"])
     status = sh(["git", "status", "--porcelain"])
     if not status.strip():
@@ -63,647 +47,195 @@ def commit_change(message: str) -> bool:
     return True
 
 
-def push_branch(branch: str) -> None:
-    sh(["git", "push", "-u", "origin", branch])
-
-
 def get_repo_full_name() -> str:
-    repo = os.environ.get("GITHUB_REPOSITORY")
+    repo = os.getenv("GITHUB_REPOSITORY")
     if not repo:
-        raise RuntimeError("GITHUB_REPOSITORY env var is missing")
+        raise RuntimeError("GITHUB_REPOSITORY missing")
     return repo
 
 
-def get_token() -> str:
-    token = os.environ.get("GITHUB_TOKEN")
-    if not token:
-        raise RuntimeError("GITHUB_TOKEN env var is missing")
-    return token
-
-
 def gh_client() -> Github:
-    return Github(auth=Auth.Token(get_token()))
+    token = os.getenv("GITHUB_TOKEN")
+    if not token:
+        raise RuntimeError("GITHUB_TOKEN missing")
+    return Github(auth=Auth.Token(token))
 
 
-def find_existing_pr(gh_repo, head: str) -> Optional[int]:
-    pulls = gh_repo.get_pulls(state="open", head=head)
-    for pr in pulls:
-        return pr.number
-    return None
+# -------------------- LLM CODE GENERATION --------------------
 
+CODE_PROMPT = """
+You are a senior software engineer.
 
-def extract_issue_number_from_pr(pr_body: str) -> Optional[int]:
-    m = re.search(r"Closes\s+#(\d+)", pr_body or "", flags=re.IGNORECASE)
-    return int(m.group(1)) if m else None
+Task:
+Implement the GitHub Issue described below by writing real code.
 
+Rules:
+- Write real Python code.
+- Create files if they do not exist.
+- Modify files if they already exist.
+- Do NOT write diffs.
+- Do NOT explain anything.
+- Do NOT add markdown.
 
-def parse_iteration(pr_body: str) -> int:
-    m = re.search(r"AI-ITERATION:\s*(\d+)", pr_body or "")
-    return int(m.group(1)) if m else 1
+Output format (STRICT):
+For each file, output:
 
+FILE: path/to/file.py
+<full file content>
 
-def bump_iteration(pr_body: str, new_iter: int) -> str:
-    body = pr_body or ""
-    if re.search(r"AI-ITERATION:\s*\d+", body):
-        return re.sub(r"AI-ITERATION:\s*\d+", f"AI-ITERATION: {new_iter}", body)
-    return body.strip() + f"\n\nAI-ITERATION: {new_iter}\n"
-
-
-def extract_latest_ai_review(pr) -> str:
-    comments = list(pr.get_issue_comments())
-    for c in reversed(comments):
-        txt = (c.body or "").strip()
-        if txt.startswith("AI-REVIEW:"):
-            return txt
-    return ""
-
-
-def checkout_default_branch(base_branch: str) -> None:
-    sh(["git", "fetch", "origin", base_branch])
-    sh(["git", "checkout", base_branch])
-    sh(["git", "reset", "--hard", f"origin/{base_branch}"])
-
-
-def checkout_remote_branch(branch: str) -> None:
-    sh(["git", "fetch", "origin", branch])
-    sh(["git", "checkout", "-B", branch, f"origin/{branch}"])
-
-
-def write_ai_issue_file(issue_number: int, title: str, body: str) -> str:
-    os.makedirs(AI_DIR, exist_ok=True)
-    out_path = os.path.join(AI_DIR, f"issue-{issue_number}.md")
-    now = datetime.utcnow().isoformat() + "Z"
-    content = (
-        f"# Issue {issue_number}\n\n"
-        f"## Title\n{title}\n\n"
-        f"## Body\n{body}\n\n"
-        f"## Generated\n{now}\n"
-    )
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write(content)
-    return out_path
-
-
-# -------------------- LLM patch generation helpers --------------------
-
-
-def repo_file_tree(max_files: int = 120) -> str:
-    """
-    IMPORTANT: keep this small to avoid huge prompts that cause HF Router to return reasoning only.
-    """
-    files = sh(["git", "ls-files"]).splitlines()
-    files = [f for f in files if not f.startswith("build/")]
-    preferred: list[str] = []
-    rest: list[str] = []
-    for f in files:
-        if f.startswith(("src/", "tests/", "agents/")):
-            preferred.append(f)
-        else:
-            rest.append(f)
-    ordered = preferred + rest
-    return "\n".join(ordered[:max_files])
-
-
-def build_code_prompt(issue_title: str, issue_body: str, ai_review: str) -> str:
-    tree = repo_file_tree()
-    return f"""
-SYSTEM:
-You are a senior software engineer acting as a GitHub Code Agent.
-
-DEVELOPER (ABSOLUTE RULES):
-Return ONLY a valid JSON object with EXACT keys:
-- "patch": string (a unified diff for `git apply`)
-- "notes": string (1-2 short lines)
-
-Rules for JSON:
-- Output MUST be valid JSON (double quotes, no trailing commas).
-- No markdown, no code fences, no extra text before/after JSON.
-
-Rules for patch:
-- patch MUST start with "diff --git a/".
-- Do NOT include lines starting with: "index ", "new file mode", "deleted file mode".
-- For new files you MUST use exactly: "--- /dev/null" and "+++ b/<path>".
-- NEVER output '--- dev/null' (without slash).
-- Every changed file MUST have at least one @@ hunk.
-- Inside hunks, every line MUST start with '+', '-', ' ', or '\\\\'.
-- Keep changes minimal and directly related to Issue / review feedback.
-
-Safety constraints:
-- Forbidden exact files: {DENY_EXACT}
-- Forbidden path prefixes: {DENY_PATH_PREFIXES}
-- Allowed path prefixes: {ALLOWED_PATH_PREFIXES}
-- Allowed exact files: {ALLOWED_EXACT}
-
-Repository file list (partial):
-{tree}
+You may output multiple FILE blocks.
 
 Issue title:
-{issue_title}
+{title}
 
 Issue body:
-{issue_body}
-
-Latest AI review feedback (fix these issues if present):
-{ai_review}
-
-OUTPUT (JSON only):
+{body}
 """.strip()
 
 
-def _preview(text: str, n: int = LLM_PREVIEW_CHARS) -> str:
-    t = (text or "").strip()
-    if len(t) <= n:
-        return t
-    return t[:n] + "..."
-
-
-def strip_code_fences_only(text: str) -> str:
+def parse_files_from_llm(text: str) -> Dict[str, str]:
     """
-    Remove surrounding markdown fences if model included them. Do NOT attempt
-    to sanitize diff structure here (it can break /dev/null semantics).
+    Parses:
+    FILE: path
+    <content>
     """
-    t = (text or "").strip()
-    # strip opening fence
-    t = re.sub(r"^\s*```[a-zA-Z0-9_-]*\s*\n", "", t)
-    # strip closing fence
-    t = re.sub(r"\n\s*```\s*$", "", t)
-    return t.strip()
+    files: Dict[str, str] = {}
+    current_path = None
+    buffer = []
 
-
-def extract_patch_from_llm(text: str) -> Tuple[str, str]:
-    """
-    Returns (patch, notes). Supports:
-    1) JSON: {"patch": "...", "notes": "..."}
-    2) Fallback: raw unified diff starting from 'diff --git'
-    """
-    raw = (text or "").strip()
-
-    # 1) Try pure JSON
-    if raw.startswith("{"):
-        try:
-            obj = json.loads(raw)
-            patch = (obj.get("patch") or "").strip()
-            notes = (obj.get("notes") or "").strip()
-            return patch, notes
-        except Exception:
-            pass
-
-    # 2) Try to find JSON object inside text (common when model adds extra lines)
-    m = re.search(r"\{.*\}", raw, flags=re.DOTALL)
-    if m:
-        try:
-            obj = json.loads(m.group(0))
-            patch = (obj.get("patch") or "").strip()
-            notes = (obj.get("notes") or "").strip()
-            return patch, notes
-        except Exception:
-            pass
-
-    # 3) Fallback to diff extraction
-    idx = raw.find("diff --git")
-    if idx != -1:
-        return raw[idx:].strip(), ""
-
-    return "", ""
-
-
-def looks_like_unified_diff(t: str) -> bool:
-    s = (t or "").lstrip()
-    if not s.startswith("diff --git"):
-        return False
-    if "\n--- " not in s or "\n+++ " not in s:
-        return False
-    # allow bare @@ (we can fix it), but must contain at least one @@ marker
-    if "\n@@" not in s:
-        return False
-    return True
-
-
-def _path_is_allowed(path: str) -> bool:
-    if path in ALLOWED_EXACT:
-        return True
-    return any(path.startswith(p) for p in ALLOWED_PATH_PREFIXES)
-
-
-def diff_touches_forbidden(diff_text: str) -> Optional[str]:
-    for line in diff_text.splitlines():
-        if line.startswith("+++ b/"):
-            path = line[6:]
-        elif line.startswith("--- a/"):
-            path = line[6:]
+    for line in text.splitlines():
+        if line.startswith("FILE: "):
+            if current_path:
+                files[current_path] = "\n".join(buffer).rstrip() + "\n"
+            current_path = line.replace("FILE: ", "").strip()
+            buffer = []
         else:
-            continue
+            buffer.append(line)
 
-        if not path or path == "/dev/null":
-            continue
-        if path in DENY_EXACT:
-            return f"attempted to modify forbidden file: {path}"
-        if any(path.startswith(p) for p in DENY_PATH_PREFIXES):
-            return f"attempted to modify forbidden path: {path}"
-        if not _path_is_allowed(path):
-            return f"attempted to modify non-allowed path: {path}"
-    return None
+    if current_path:
+        files[current_path] = "\n".join(buffer).rstrip() + "\n"
+
+    return files
 
 
-def canonicalize_llm_patch(patch: str) -> str:
-    """
-    Make a strict unified diff safe for `git apply` from imperfect LLM output.
-    Key fixes:
-    - Split by 'diff --git' so sections can't bleed into each other.
-    - Normalize /dev/null markers.
-    - Fix bare '@@' by converting to '@@ -0,0 +1,N @@' (N counted from added lines).
-    - Ensure all hunk lines are prefixed (+/-/space/\\). Missing prefix => '+'
-    """
-    txt = (patch or "").replace("\r\n", "\n").strip()
-    if "diff --git" not in txt:
-        return ""
-
-    # Keep only from first diff header
-    txt = txt[txt.find("diff --git") :]
-
-    # Split into file sections
-    parts = re.split(r"(?m)^(?=diff --git )", txt)
-    sections = [p for p in parts if p.strip()]
-
-    out_sections: list[str] = []
-
-    for sec in sections:
-        lines = sec.splitlines()
-        sec_out: list[str] = []
-
-        in_hunk = False
-        pending_bare_hunk = False
-        bare_hunk_added = 0
-
-        for line in lines:
-            line = line.rstrip()
-
-            if line.startswith("diff --git "):
-                in_hunk = False
-                pending_bare_hunk = False
-                sec_out.append(line)
-                continue
-
-            if line.startswith("--- "):
-                in_hunk = False
-                pending_bare_hunk = False
-                line = re.sub(r"^---\s+(?:a/)?dev/null\s*$", "--- /dev/null", line)
-                sec_out.append(line)
-                continue
-
-            if line.startswith("+++ "):
-                in_hunk = False
-                pending_bare_hunk = False
-                line = re.sub(r"^\+\+\+\s+(?:b/)?dev/null\s*$", "+++ /dev/null", line)
-                sec_out.append(line)
-                continue
-
-            if line.startswith("@@ "):
-                in_hunk = True
-                pending_bare_hunk = False
-                sec_out.append(line)
-                continue
-
-            if line.strip() == "@@":
-                in_hunk = True
-                pending_bare_hunk = True
-                bare_hunk_added = 0
-                sec_out.append("@@ __BARE__ @@")
-                continue
-
-            if not in_hunk:
-                sec_out.append(line)
-                continue
-
-            # Inside hunk
-            if line.startswith(("diff --git ", "--- ", "+++ ")):
-                in_hunk = False
-                pending_bare_hunk = False
-                sec_out.append(line)
-                continue
-
-            if line.startswith(("+", "-", " ", "\\")):
-                sec_out.append(line)
-                if pending_bare_hunk and (line.startswith("+") or line == "+"):
-                    bare_hunk_added += 1
-                continue
-
-            if line == "":
-                sec_out.append("+")
-                if pending_bare_hunk:
-                    bare_hunk_added += 1
-                continue
-
-            sec_out.append("+" + line)
-            if pending_bare_hunk:
-                bare_hunk_added += 1
-
-        fixed_sec: list[str] = []
-        for ln in sec_out:
-            if ln == "@@ __BARE__ @@":
-                n = bare_hunk_added if bare_hunk_added > 0 else 1
-                fixed_sec.append(f"@@ -0,0 +1,{n} @@")
-            else:
-                fixed_sec.append(ln)
-
-        out_sections.append("\n".join(fixed_sec).rstrip() + "\n")
-
-    return "\n".join(out_sections).rstrip() + "\n"
+def write_files(files: Dict[str, str]) -> None:
+    for path, content in files.items():
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
 
 
-def apply_unified_diff(diff_text: str) -> None:
-    """
-    Apply LLM diff to working tree. Always canonicalizes first to avoid common failures:
-    - bare @@ headers
-    - missing '+' prefixes
-    - /dev/null normalization
-    """
-    diff_text = strip_code_fences_only(diff_text)
-    diff_text = canonicalize_llm_patch(diff_text)
-
-    p = subprocess.run(
-        ["git", "apply", "--whitespace=fix"],
-        input=diff_text,
-        text=True,
-        capture_output=True,
-    )
-    if p.returncode == 0:
-        return
-
-    p2 = subprocess.run(
-        ["git", "apply", "--3way", "--whitespace=fix"],
-        input=diff_text,
-        text=True,
-        capture_output=True,
-    )
-    if p2.returncode == 0:
-        return
-
-    err1 = (p.stderr or "").strip()
-    err2 = (p2.stderr or "").strip()
-    raise RuntimeError(
-        ("git apply failed:\n" + err1 + "\n---\n3way failed:\n" + err2).strip()
-    )
+# -------------------- main flows --------------------
 
 
-def attempt_llm_patch(
-    issue_title: str, issue_body: str, ai_review: str
-) -> Tuple[bool, str, str, str]:
-    """
-    Returns (applied, mode, message, raw_preview)
-    """
-
-    def llm_generate_patch(prompt: str) -> Tuple[str, str, str]:
-        raw, llm_mode = llm_chat(prompt)
-        raw = raw or ""
-
-        patch, _notes = extract_patch_from_llm(raw)
-        patch = strip_code_fences_only(patch)
-
-        if not patch or "diff --git" not in patch:
-            return "", llm_mode, raw
-        if not looks_like_unified_diff(patch):
-            # still allow canonicalizer to fix bare @@ and missing prefixes,
-            # but we need at least the diff skeleton
-            return "", llm_mode, raw
-
-        patch = patch[:MAX_DIFF_CHARS]
-        return patch, llm_mode, raw
-
-    # 1) main attempt
-    prompt = build_code_prompt(issue_title, issue_body, ai_review=ai_review)
-    diff_text, llm_mode, raw_used = llm_generate_patch(prompt)
-
-    # 2) retry if empty
-    if not diff_text:
-        retry_prompt = f"""
-SYSTEM:
-Return ONLY JSON with keys "patch" and "notes".
-
-Rules:
-- JSON only, no extra text.
-- "patch" MUST be unified diff starting with 'diff --git a/'.
-- For new files use exactly: '--- /dev/null' and '+++ b/<path>'.
-- Every file must have at least one @@ hunk.
-- Inside hunks, every line starts with '+', '-', ' ', or '\\\\'.
-
-Issue:
-{issue_title}
-{issue_body}
-
-Review feedback:
-{ai_review}
-
-OUTPUT (JSON only):
-""".strip()
-        diff_text, llm_mode, raw_used = llm_generate_patch(retry_prompt)
-
-    if not diff_text:
-        return (
-            False,
-            llm_mode,
-            "no unified diff produced (sanity check failed)",
-            _preview(raw_used),
-        )
-
-    reason = diff_touches_forbidden(diff_text)
-    if reason:
-        return False, llm_mode, f"patch rejected: {reason}", _preview(raw_used)
-
-    try:
-        apply_unified_diff(diff_text)
-        return True, llm_mode, "patch applied", _preview(raw_used)
-
-    except Exception as e:
-        # 3) repair retry
-        repair_prompt = f"""
-SYSTEM:
-Your previous patch failed to apply. Return a NEW patch.
-
-Return ONLY JSON with keys "patch" and "notes".
-
-Rules:
-- JSON only, no extra text.
-- "patch" MUST be unified diff starting with 'diff --git a/'.
-- Do NOT include 'index ', 'new file mode', 'deleted file mode'.
-- For new files use exactly: '--- /dev/null' and '+++ b/<path>'.
-- Every file must have at least one @@ hunk with ranges.
-- Inside hunks, every line starts with '+', '-', ' ', or '\\\\'.
-
-Issue:
-{issue_title}
-{issue_body}
-
-AI review feedback:
-{ai_review}
-
-OUTPUT (JSON only):
-""".strip()
-
-        diff3, llm_mode3, raw3 = llm_generate_patch(repair_prompt)
-        if not diff3:
-            return (
-                False,
-                llm_mode3,
-                f"failed to apply patch; repair retry produced no diff. original error: {e}",
-                _preview(raw3),
-            )
-
-        reason2 = diff_touches_forbidden(diff3)
-        if reason2:
-            return (
-                False,
-                llm_mode3,
-                f"repair patch rejected: {reason2}",
-                _preview(raw3),
-            )
-
-        try:
-            apply_unified_diff(diff3)
-            return True, llm_mode3, "patch applied (repair retry)", _preview(raw3)
-        except Exception as e2:
-            return (
-                False,
-                llm_mode3,
-                f"failed to apply patch after repair retry: {e2}",
-                _preview(raw3),
-            )
-
-
-# -------------------- Main flows --------------------
-
-
-def handle_issue_mode(gh_repo, issue_number: int) -> None:
-    issue = gh_repo.get_issue(number=issue_number)
-    title = issue.title or f"Issue {issue_number}"
+def handle_issue_mode(repo, issue_number: int) -> None:
+    issue = repo.get_issue(number=issue_number)
+    title = issue.title or ""
     body = issue.body or ""
 
-    repo_full = get_repo_full_name()
-    owner = repo_full.split("/")[0]
-    base_branch = gh_repo.default_branch
-    branch = f"issue-{issue_number}-{safe_branch_name(title)}"
-
     ensure_git_identity()
-    checkout_default_branch(base_branch)
-    sh(["git", "checkout", "-B", branch])
 
-    created_path = write_ai_issue_file(issue_number, title, body)
+    branch = f"issue-{issue_number}"
+    sh(["git", "checkout", "-B", branch, repo.default_branch])
 
-    applied, llm_mode, msg, raw_preview = attempt_llm_patch(title, body, ai_review="")
-    fmt_msg = maybe_format_with_black()
+    os.makedirs(AI_DIR, exist_ok=True)
+    with open(f"{AI_DIR}/issue-{issue_number}.md", "w", encoding="utf-8") as f:
+        f.write(f"# {title}\n\n{body}\n\nGenerated: {datetime.utcnow()}")
 
-    issue.create_comment(
-        f"Code Agent: LLM mode={llm_mode}; {msg}. {fmt_msg}\n\n"
-        f"LLM preview (first {LLM_PREVIEW_CHARS} chars):\n{raw_preview}"
-    )
+    prompt = CODE_PROMPT.format(title=title, body=body)
+    raw, mode = llm_chat(prompt)
 
-    commit_change(f"Implement Issue #{issue_number}")
-    push_branch(branch)
+    files = parse_files_from_llm(raw)
 
-    head = f"{owner}:{branch}"
-    existing = find_existing_pr(gh_repo, head=head)
-
-    pr_title = f"Implement #{issue_number}: {title}"
-    pr_body = (
-        f"Closes #{issue_number}\n\n"
-        "AI-ITERATION: 1\n\n"
-        f"Created `{created_path}`.\n"
-        f"LLM mode: {llm_mode}; result: {msg}\n"
-        f"{fmt_msg}\n"
-    )
-
-    if existing:
-        pr = gh_repo.get_pull(existing)
-        pr.create_issue_comment("Code Agent: updated branch with new changes.")
-        issue.create_comment(f"Code Agent: updated existing PR #{pr.number}")
-    else:
-        pr = gh_repo.create_pull(
-            title=pr_title,
-            body=pr_body,
-            head=branch,
-            base=base_branch,
-            draft=False,
-        )
-        issue.create_comment(f"Code Agent: created PR #{pr.number}")
-
-    print(f"OK: PR #{pr.number} for Issue #{issue_number}")
-
-
-def handle_pr_iteration_mode(gh_repo, pr_number: int) -> None:
-    pr = gh_repo.get_pull(pr_number)
-    current_iter = parse_iteration(pr.body or "")
-
-    if current_iter >= MAX_ITERATIONS:
-        pr.create_issue_comment(
-            f"Code Agent: reached iteration limit ({MAX_ITERATIONS}). Stopping."
-        )
-        print("STOP: iteration limit reached")
+    if not files:
+        issue.create_comment(f"Code Agent: LLM returned no files (mode={mode}).")
         return
 
-    issue_number = extract_issue_number_from_pr(pr.body or "")
-    ai_review = extract_latest_ai_review(pr)
+    write_files(files)
+    fmt = maybe_format_with_black()
+
+    committed = commit_if_needed(f"Implement issue #{issue_number}")
+    sh(["git", "push", "-u", "origin", branch])
+
+    pr = repo.create_pull(
+        title=f"Implement #{issue_number}: {title}",
+        body=f"Closes #{issue_number}\n\nAI-ITERATION: 1",
+        head=branch,
+        base=repo.default_branch,
+    )
+
+    issue.create_comment(f"Code Agent: created PR #{pr.number}. {fmt}")
+
+
+def handle_pr_iteration_mode(repo, pr_number: int) -> None:
+    pr = repo.get_pull(pr_number)
+
+    m = re.search(r"AI-ITERATION:\s*(\d+)", pr.body or "")
+    iteration = int(m.group(1)) if m else 1
+
+    if iteration >= MAX_ITERATIONS:
+        pr.create_issue_comment("Code Agent: iteration limit reached.")
+        return
+
+    issue_number = None
+    m = re.search(r"Closes\s+#(\d+)", pr.body or "")
+    if m:
+        issue_number = int(m.group(1))
 
     issue_title = ""
     issue_body = ""
     if issue_number:
-        issue = gh_repo.get_issue(number=issue_number)
+        issue = repo.get_issue(number=issue_number)
         issue_title = issue.title or ""
         issue_body = issue.body or ""
 
     ensure_git_identity()
-    branch = pr.head.ref
-    checkout_remote_branch(branch)
+    sh(["git", "checkout", "-B", pr.head.ref, f"origin/{pr.head.ref}"])
 
-    applied, llm_mode, msg, raw_preview = attempt_llm_patch(
-        issue_title, issue_body, ai_review=ai_review
-    )
-    fmt_msg = maybe_format_with_black()
+    prompt = CODE_PROMPT.format(title=issue_title, body=issue_body)
+    raw, mode = llm_chat(prompt)
 
-    if not applied:
-        pr.create_issue_comment(
-            f"Code Agent: LLM patch not applied (mode={llm_mode}): {msg}. {fmt_msg}\n"
-            "No changes committed; iteration not bumped.\n\n"
-            f"LLM preview (first {LLM_PREVIEW_CHARS} chars):\n{raw_preview}"
-        )
-        print(f"OK: no patch applied for PR #{pr_number}")
+    files = parse_files_from_llm(raw)
+    if not files:
+        pr.create_issue_comment(f"Code Agent: no code generated (mode={mode}).")
         return
 
-    committed = commit_change(f"Fix based on AI review (iteration {current_iter + 1})")
-    if not committed:
-        pr.create_issue_comment(
-            f"Code Agent: patch applied but resulted in no net changes. {fmt_msg}\n"
-            "Iteration not bumped."
-        )
-        print(f"OK: no net changes for PR #{pr_number}")
+    write_files(files)
+    fmt = maybe_format_with_black()
+
+    if not commit_if_needed(f"Fix after review (iteration {iteration + 1})"):
+        pr.create_issue_comment("Code Agent: no effective changes.")
         return
 
-    push_branch(branch)
+    sh(["git", "push"])
 
-    next_iter = current_iter + 1
-    pr.edit(body=bump_iteration(pr.body or "", next_iter))
-    pr.create_issue_comment(
-        f"Code Agent: iteration {next_iter} pushed updates. "
-        f"LLM mode={llm_mode}; {msg}. {fmt_msg}"
+    pr.edit(
+        body=re.sub(
+            r"AI-ITERATION:\s*\d+",
+            f"AI-ITERATION: {iteration + 1}",
+            pr.body,
+        )
     )
 
-    print(f"OK: updated PR #{pr_number} iteration {next_iter}")
+    pr.create_issue_comment(f"Code Agent: pushed iteration {iteration + 1}. {fmt}")
+
+
+# -------------------- entry --------------------
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--issue", type=int)
-    group.add_argument("--pr", type=int)
+    g = parser.add_mutually_exclusive_group(required=True)
+    g.add_argument("--issue", type=int)
+    g.add_argument("--pr", type=int)
     args = parser.parse_args()
 
-    gh = gh_client()
-    gh_repo = gh.get_repo(get_repo_full_name())
+    repo = gh_client().get_repo(get_repo_full_name())
 
-    if args.issue is not None:
-        handle_issue_mode(gh_repo, args.issue)
-        return
-
-    handle_pr_iteration_mode(gh_repo, args.pr)
+    if args.issue:
+        handle_issue_mode(repo, args.issue)
+    else:
+        handle_pr_iteration_mode(repo, args.pr)
 
 
 if __name__ == "__main__":

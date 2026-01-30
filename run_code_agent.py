@@ -356,9 +356,53 @@ def repair_unified_diff(diff_text: str) -> str:
     return fixed
 
 
+def fix_bare_hunk_headers(diff_text: str) -> str:
+    """
+    Some models output invalid hunk headers like '@@' without ranges.
+    This function upgrades bare hunks to a valid form for new-file patches:
+      @@ -0,0 +1,N @@
+    where N is the count of added lines until the next structural marker.
+    """
+    lines = diff_text.replace("\r\n", "\n").splitlines()
+    out: list[str] = []
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+
+        if line.strip() == "@@":
+            # Count added lines until next structural marker
+            j = i + 1
+            added = 0
+            while j < len(lines):
+                nxt = lines[j]
+                if nxt.startswith(("diff --git ", "--- ", "+++ ", "@@ ")):
+                    break
+                if nxt.startswith("+") or nxt == "+":
+                    added += 1
+                j += 1
+
+            # Fallback if somehow zero
+            if added <= 0:
+                added = 1
+
+            out.append(f"@@ -0,0 +1,{added} @@")
+            i += 1
+            continue
+
+        out.append(line)
+        i += 1
+
+    fixed = "\n".join(out)
+    if not fixed.endswith("\n"):
+        fixed += "\n"
+    return fixed
+
+
 def apply_unified_diff(diff_text: str) -> None:
     """Apply a unified diff to the working tree. Tries normal apply, then 3-way."""
     diff_text = normalize_dev_null(diff_text)
+    diff_text = fix_bare_hunk_headers(diff_text)
     diff_text = repair_unified_diff(diff_text)
 
     p = subprocess.run(

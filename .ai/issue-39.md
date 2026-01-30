@@ -10,3 +10,8 @@ Ensure CI passes.
 
 ## Generated
 2026-01-30T10:15:05.066541Z
+
+
+## Auto-fix iteration
+- iteration: 2
+- ai_review_detected: yes

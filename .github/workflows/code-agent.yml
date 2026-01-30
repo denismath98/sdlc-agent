@@ -4,25 +4,23 @@ on:
   issues:
     types: [opened]
   pull_request:
-    types: [labeled, synchronize, reopened]
+    types: [labeled]
   workflow_dispatch:
 
 jobs:
   code-agent:
     if: |
       github.event_name == 'issues' ||
-      (
-        github.event_name == 'pull_request' &&
-        (
-          (github.event.action == 'labeled' && github.event.label.name == 'ai:needs-fix') ||
-          (
-            (github.event.action == 'synchronize' || github.event.action == 'reopened') &&
-            contains(toJson(github.event.pull_request.labels), 'ai:needs-fix')
-          )
-        )
-      )
+      (github.event_name == 'pull_request' &&
+       github.event.action == 'labeled' &&
+       github.event.label.name == 'ai:needs-fix')
 
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: code-agent-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: true
+
     permissions:
       contents: write
       pull-requests: write

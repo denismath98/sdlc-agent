@@ -110,6 +110,20 @@ def checkout_remote_branch(branch: str) -> None:
     sh(["git", "checkout", "-B", branch, f"origin/{branch}"])
 
 
+def maybe_format_with_black() -> None:
+    """
+    Format code if black is available. Never fails the agent if black is missing.
+    """
+    try:
+        subprocess.run(["black", "."], check=True, text=True, capture_output=True)
+    except FileNotFoundError:
+        # black not installed in this environment
+        return
+    except subprocess.CalledProcessError:
+        # don't block agent; formatting failure shouldn't kill the run
+        return
+
+
 def write_ai_issue_file(issue_number: int, title: str, body: str) -> str:
     os.makedirs(AI_DIR, exist_ok=True)
     out_path = os.path.join(AI_DIR, f"issue-{issue_number}.md")
@@ -334,6 +348,7 @@ def handle_issue_mode(gh_repo, issue_number: int) -> None:
 
     status = sh(["git", "status", "--porcelain"])
     if status:
+        maybe_format_with_black()
         commit_change(f"Implement Issue #{issue_number}")
         push_branch(branch)
     else:
@@ -422,6 +437,7 @@ def handle_pr_iteration_mode(gh_repo, pr_number: int) -> None:
 
     status = sh(["git", "status", "--porcelain"])
     if status:
+        maybe_format_with_black()
         commit_change(f"Fix based on AI review (iteration {next_iter})")
         push_branch(branch)
 

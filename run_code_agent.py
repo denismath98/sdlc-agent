@@ -120,7 +120,10 @@ def parse_files_from_llm(text: str) -> Dict[str, str]:
 
 def write_files(files: Dict[str, str]) -> None:
     for path, content in files.items():
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        dir_path = os.path.dirname(path)
+        if dir_path:  # <-- важно: если пусто, значит файл в корне (README.md)
+            os.makedirs(dir_path, exist_ok=True)
+
         with open(path, "w", encoding="utf-8") as f:
             f.write(content)
 

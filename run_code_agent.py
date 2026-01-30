@@ -276,9 +276,62 @@ def normalize_dev_null(diff_text: str) -> str:
     return diff_text
 
 
+def repair_unified_diff(diff_text: str) -> str:
+    """
+    Repair common LLM mistakes that make `git apply` fail with 'corrupt patch':
+    - Lines inside hunks missing the leading '+', '-', or ' ' prefix.
+    - Blank lines inside hunks should be '+' (added empty line).
+    """
+    lines = diff_text.replace("\r\n", "\n").splitlines()
+    out: list[str] = []
+
+    in_hunk = False
+    for line in lines:
+        # Start of file diff resets hunk context
+        if line.startswith("diff --git "):
+            in_hunk = False
+            out.append(line)
+            continue
+
+        # Hunk header
+        if line.startswith("@@ "):
+            in_hunk = True
+            out.append(line)
+            continue
+
+        # File headers / metadata end hunk mode until next @@
+        if line.startswith(("--- ", "+++ ")):
+            in_hunk = False
+            out.append(line)
+            continue
+
+        if not in_hunk:
+            out.append(line)
+            continue
+
+        # We are inside a hunk:
+        if line.startswith(("+", "-", " ", "\\")):
+            out.append(line)
+            continue
+
+        # A blank line inside a hunk should be an added blank line
+        if line.strip() == "":
+            out.append("+")
+            continue
+
+        # Otherwise: missing prefix, treat as added line
+        out.append("+" + line)
+
+    fixed = "\n".join(out)
+    if not fixed.endswith("\n"):
+        fixed += "\n"
+    return fixed
+
+
 def apply_unified_diff(diff_text: str) -> None:
     """Apply a unified diff to the working tree. Tries normal apply, then 3-way."""
     diff_text = normalize_dev_null(diff_text)
+    diff_text = repair_unified_diff(diff_text)
 
     p = subprocess.run(
         ["git", "apply", "--whitespace=fix"],

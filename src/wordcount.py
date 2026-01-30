@@ -1,18 +1,18 @@
 import argparse
 import sys
 from pathlib import Path
-from typing import Callable
 
 
 def count_words(text: str) -> int:
     """Return the number of words in the given text."""
-    # Split on any whitespace and filter out empty strings
     return len([w for w in text.split() if w])
 
 
 def count_lines(text: str) -> int:
     """Return the number of lines in the given text."""
-    # splitlines handles different newline conventions and does not keep the linebreaks
+    if not text:
+        return 0
+    # splitlines handles different newline conventions
     return len(text.splitlines())
 
 
@@ -21,49 +21,43 @@ def count_chars(text: str) -> int:
     return len(text)
 
 
-def _get_counter(mode: str) -> Callable[[str], int]:
-    if mode == "words":
-        return count_words
-    if mode == "lines":
-        return count_lines
-    if mode == "chars":
-        return count_chars
-    raise ValueError(f"Unsupported mode: {mode!r}. Choose from words|lines|chars.")
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Count words, lines, or characters in a text file."
-    )
+def _parse_args(argv):
+    parser = argparse.ArgumentParser(description="Word count utility")
     parser.add_argument(
         "--file",
         required=True,
         type=Path,
-        help="Path to the input text file.",
+        help="Path to the input text file",
     )
     parser.add_argument(
         "--mode",
         required=True,
         choices=["words", "lines", "chars"],
-        help="Counting mode: words, lines, or chars.",
+        help="Counting mode: words, lines, or chars",
     )
-    args = parser.parse_args(argv)
+    return parser.parse_args(argv)
 
-    if not args.file.is_file():
-        print(f"Error: file not found – {args.file}", file=sys.stderr)
-        return 1
+
+def main(argv=None):
+    if argv is None:
+        argv = sys.argv[1:]
+    args = _parse_args(argv)
 
     try:
         text = args.file.read_text(encoding="utf-8")
-    except Exception as exc:
-        print(f"Error reading file: {exc}", file=sys.stderr)
-        return 1
+    except Exception as e:
+        print(f"Error reading file {args.file}: {e}", file=sys.stderr)
+        sys.exit(1)
 
-    counter = _get_counter(args.mode)
-    result = counter(text)
+    if args.mode == "words":
+        result = count_words(text)
+    elif args.mode == "lines":
+        result = count_lines(text)
+    else:  # chars
+        result = count_chars(text)
+
     print(result)
-    return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

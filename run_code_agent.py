@@ -159,6 +159,14 @@ DEVELOPER (MANDATORY OUTPUT FORMAT):
 - Do NOT output any other text, explanation, markdown, or code fences.
 - If you cannot produce a valid diff, output an empty string.
 
+APPLY-SAFETY RULES (IMPORTANT):
+- Do NOT include lines starting with: "index ", "new file mode", "deleted file mode".
+- For new files, use ONLY:
+  --- /dev/null
+  +++ b/<path>
+  and standard @@ hunks.
+- Do not invent file names. If a Python package init is needed, use __init__.py (double underscores).
+
 Safety constraints:
 - Forbidden exact files: {DENY_EXACT}
 - Forbidden path prefixes: {DENY_PATH_PREFIXES}
@@ -178,7 +186,7 @@ Latest AI review feedback (if any):
 {ai_review}
 
 Task:
-Implement the Issue requirements. If AI review points out mismatches or missing work, fix them.
+Implement the Issue requirements. If the AI review points out mismatches or missing work, fix them.
 Remember: output ONLY unified diff starting with 'diff --git'.
 """.strip()
 
@@ -186,7 +194,12 @@ Remember: output ONLY unified diff starting with 'diff --git'.
 def extract_unified_diff(text: str) -> str:
     t = (text or "").strip()
     idx = t.find("diff --git")
-    return "" if idx == -1 else (t[idx:] + "\n")
+    if idx == -1:
+        return ""
+    diff = t[idx:]
+    if not diff.endswith("\n"):
+        diff += "\n"
+    return diff
 
 
 def _path_is_allowed(path: str) -> bool:
@@ -211,14 +224,29 @@ def diff_touches_forbidden(diff_text: str) -> Optional[str]:
 
 
 def apply_unified_diff(diff_text: str) -> None:
+    """Apply a unified diff to the working tree. Tries normal apply, then 3-way."""
     p = subprocess.run(
         ["git", "apply", "--whitespace=fix"],
         input=diff_text,
         text=True,
         capture_output=True,
     )
-    if p.returncode != 0:
-        raise RuntimeError(p.stderr.strip() or "git apply failed")
+    if p.returncode == 0:
+        return
+
+    # 3-way helps when a file already exists or context slightly differs
+    p2 = subprocess.run(
+        ["git", "apply", "--3way", "--whitespace=fix"],
+        input=diff_text,
+        text=True,
+        capture_output=True,
+    )
+    if p2.returncode == 0:
+        return
+
+    err1 = (p.stderr or "").strip()
+    err2 = (p2.stderr or "").strip()
+    raise RuntimeError(("git apply failed:\n" + err1 + "\n---\n3way failed:\n" + err2).strip())
 
 
 def attempt_llm_patch(
@@ -228,11 +256,12 @@ def attempt_llm_patch(
     llm_out, llm_mode = llm_chat(prompt)
     diff_text = extract_unified_diff(llm_out)
 
-    # Retry once with extra-strict short prompt (helps with "corrupt patch")
+    # Retry once with extra-strict short prompt (helps with missing/garbled diff)
     if not diff_text:
         retry_prompt = (
             "Output ONLY unified diff for `git apply`.\n"
             "First non-empty line MUST start with: diff --git a/\n"
+            "Do NOT include lines starting with: index , new file mode, deleted file mode.\n"
             "No other text.\n\n"
             f"Issue:\n{issue_title}\n{issue_body}\n\n"
             f"AI review:\n{ai_review}\n"
@@ -253,6 +282,31 @@ def attempt_llm_patch(
         apply_unified_diff(diff_text)
         return True, llm_mode, "patch applied"
     except Exception as e:
+        # One repair retry: ask the model to regenerate an apply-safe diff
+        repair_prompt = (
+            "Your previous unified diff failed to apply.\n"
+            "Return a NEW apply-safe unified diff suitable for `git apply`.\n"
+            "Rules:\n"
+            "- Output ONLY unified diff starting with 'diff --git a/'.\n"
+            "- Do NOT include lines starting with: index , new file mode, deleted file mode.\n"
+            "- If a file already exists, MODIFY it. If it doesn't exist, CREATE it using /dev/null.\n"
+            "- Do not invent file names. Use __init__.py if a package init is needed.\n"
+            "No other text.\n\n"
+            f"Issue:\n{issue_title}\n{issue_body}\n\n"
+            f"AI review:\n{ai_review}\n"
+        )
+        llm_out3, llm_mode3 = llm_chat(repair_prompt)
+        diff3 = extract_unified_diff(llm_out3)
+        if diff3:
+            diff3 = diff3[:MAX_DIFF_CHARS]
+            reason2 = diff_touches_forbidden(diff3)
+            if not reason2:
+                try:
+                    apply_unified_diff(diff3)
+                    return True, llm_mode3, "patch applied (repair retry)"
+                except Exception as e2:
+                    return False, llm_mode3, f"failed to apply patch after repair retry: {e2}"
+
         return False, llm_mode, f"failed to apply patch: {e}"
 
 

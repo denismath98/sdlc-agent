@@ -1,8 +1,7 @@
 import json
 import os
-import re
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import requests
 
@@ -16,11 +15,11 @@ class LLMConfig:
     timeout_s: int = 30
     temperature: float = 0.2
     max_tokens: int = 400
-    headers: Dict[str, str] = None  # templated headers
-    endpoints: Dict[str, str] = None  # endpoint paths
+    headers: Dict[str, str] | None = None  # templated headers
+    endpoints: Dict[str, str] | None = None  # endpoint paths
 
 
-MOCK_TEXT = "status=approved\n" "issues:\n- None\n" "suggestions:\n- None\n"
+MOCK_TEXT = "status=approved\nissues:\n- None\nsuggestions:\n- None\n"
 
 
 def _safe_json_load(raw: str) -> dict:
@@ -86,6 +85,23 @@ def _get_endpoint(cfg: LLMConfig, key: str, default_path: str) -> str:
     return default_path
 
 
+def _clip(s: str, n: int = 600) -> str:
+    s = (s or "").strip()
+    if len(s) <= n:
+        return s
+    return s[:n] + "..."
+
+
+def _http_error_text(e: requests.HTTPError) -> str:
+    status = getattr(e.response, "status_code", None)
+    body = ""
+    try:
+        body = e.response.text if e.response is not None else ""
+    except Exception:
+        body = ""
+    return f"LLM_ERROR: HTTP {status}: {_clip(body)}"
+
+
 def _call_openai_chat(cfg: LLMConfig, prompt: str) -> str:
     path = _get_endpoint(cfg, "chat_completions", "/v1/chat/completions")
     url = _join_url(cfg.base_url, path)
@@ -125,7 +141,6 @@ def _call_ollama_chat(cfg: LLMConfig, prompt: str) -> str:
     r = requests.post(url, json=payload, headers=headers, timeout=cfg.timeout_s)
     r.raise_for_status()
     data = r.json()
-    # Ollama: {"message": {"content": "..."}}
     return (data.get("message") or {}).get("content") or ""
 
 
@@ -168,7 +183,9 @@ def llm_chat(prompt: str) -> Tuple[str, str]:
     """
     Returns (text, mode_used). Never raises due to provider problems (safe for CI).
 
-    If provider fails, returns empty text and mode like 'openai_chat:error(429)'.
+    IMPORTANT:
+    - On provider failures, returns a non-empty string starting with 'LLM_ERROR:'.
+    - This is crucial for debugging agents in CI.
     """
     cfg = load_llm_config()
 
@@ -188,26 +205,30 @@ def llm_chat(prompt: str) -> Tuple[str, str]:
                 return _call_hf_inference(cfg, prompt), "hf_inference"
             if cfg.mode == "custom_http":
                 return (
-                    MOCK_TEXT
-                    + "\nsuggestions:\n- LLM disabled: custom_http is not implemented.\n",
-                    "custom_http:disabled",
+                    "LLM_ERROR: custom_http mode is not implemented.",
+                    "custom_http:error",
                 )
 
             return (
-                MOCK_TEXT
-                + f"\nsuggestions:\n- LLM disabled: unknown mode '{cfg.mode}'.\n",
-                f"{cfg.mode}:disabled",
+                f"LLM_ERROR: unknown mode '{cfg.mode}'.",
+                f"{cfg.mode}:error",
             )
 
         except requests.HTTPError as e:
             status = getattr(e.response, "status_code", None)
             if attempt == 0 and retryable(status):
                 continue
-            return "", f"{cfg.mode}:error({status})"
+            return _http_error_text(e), f"{cfg.mode}:error({status})"
 
-        except Exception:
+        except requests.RequestException as e:
+            # network/timeouts/etc.
             if attempt == 0:
                 continue
-            return "", f"{cfg.mode}:error"
+            return f"LLM_ERROR: RequestException: {e}", f"{cfg.mode}:error"
 
-    return "", f"{cfg.mode}:error"
+        except Exception as e:
+            if attempt == 0:
+                continue
+            return f"LLM_ERROR: {type(e).__name__}: {e}", f"{cfg.mode}:error"
+
+    return "LLM_ERROR: unknown failure", f"{cfg.mode}:error"

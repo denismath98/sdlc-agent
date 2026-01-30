@@ -43,10 +43,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install .
-
-      - name: Debug black presence
-        run: |
-          python -m black --version || true
+          pip install black
 
       - name: Run Code Agent
         env:

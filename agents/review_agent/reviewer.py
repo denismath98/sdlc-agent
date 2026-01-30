@@ -189,40 +189,45 @@ def main() -> None:
         issue_text = (issue.body or "")[:5000]
 
     prompt = f"""
-    Issue:
-    {issue_text}
+Issue:
+{issue_text}
 
-    PR diff:
-    {diff_text}
+PR diff:
+{diff_text}
 
-    Task:
-    Return a strict review in the following format:
+Task:
+Return a strict review in the following format:
 
-    status=approved|needs-fix
-    issues:
-    - ...
-    suggestions:
-    - ...
+status=approved|needs-fix
+issues:
+- ...
+suggestions:
+- ...
 
-    Rules:
-    - If changes do not match the Issue, status=needs-fix.
-    - If CI passed but logic seems wrong or missing, status=needs-fix.
-    - Keep it short.
-    """
+Rules:
+- If changes do not match the Issue, status=needs-fix.
+- If CI passed but logic seems wrong or missing, status=needs-fix.
+- Keep it short.
+"""
 
-    try:
-        llm_out = llm_chat(prompt).strip()
-        # примитивный парсинг: если LLM сказал needs-fix — учитываем
+    # === LLM PART (UPDATED) ===
+    llm_out, llm_mode = llm_chat(prompt)
+    llm_out = (llm_out or "").strip()
+
+    res.suggestions.append(f"LLM mode: {llm_mode}")
+
+    if llm_out:
         if "status=needs-fix" in llm_out and res.status == "approved":
             res.status = "needs-fix"
             res.issues.append("LLM review: potential mismatch with requirements.")
             res.suggestions.append("See LLM output in comment.")
-        # добавим LLM вывод в suggestions как артефакт
+
         res.suggestions.append("LLM output:")
         res.suggestions.append(llm_out)
-    except Exception as e:
-        # не ломаем pipeline, если LLM не настроен
-        res.suggestions.append(f"LLM not used: {e}")
+    else:
+        res.suggestions.append("LLM produced no output.")
+
+    # === END LLM PART ===
 
     body = format_ai_review(res, pr_number=args.pr)
 

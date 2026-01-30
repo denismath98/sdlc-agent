@@ -17,7 +17,9 @@ ALLOWED_PATH_PREFIXES = ("agents/", "tests/", "src/", ".ai/")
 ALLOWED_EXACT = ("README.md",)
 DENY_PATH_PREFIXES = (".github/workflows/",)
 DENY_EXACT = ("pyproject.toml", "docker-compose.yml", "Dockerfile")
+
 MAX_DIFF_CHARS = 12000
+LLM_PREVIEW_CHARS = 500
 
 
 def sh(cmd: list[str]) -> str:
@@ -141,6 +143,9 @@ def write_ai_issue_file(issue_number: int, title: str, body: str) -> str:
     return out_path
 
 
+# -------------------- LLM patch generation helpers --------------------
+
+
 def repo_file_tree(max_files: int = 250) -> str:
     files = sh(["git", "ls-files"]).splitlines()
     files = [f for f in files if not f.startswith("build/")]
@@ -196,15 +201,47 @@ OUTPUT (diff only):
 """.strip()
 
 
-def extract_unified_diff(text: str) -> str:
+def _preview(text: str, n: int = LLM_PREVIEW_CHARS) -> str:
     t = (text or "").strip()
+    if len(t) <= n:
+        return t
+    return t[:n] + "..."
+
+
+def sanitize_llm_patch(text: str) -> str:
+    """
+    Make LLM output more likely to be a clean diff:
+    - normalize newlines
+    - remove common markdown fences
+    - remove leading text before 'diff --git'
+    """
+    t = (text or "").replace("\r\n", "\n").strip()
+
+    # Remove markdown fences commonly produced by LLM
+    if "```" in t:
+        t = t.replace("```diff", "").replace("```", "").strip()
+
+    # Sometimes LLM adds "OUTPUT:" or other headers
+    # Keep only from first 'diff --git'
     idx = t.find("diff --git")
-    if idx == -1:
-        return ""
-    diff = t[idx:]
-    if not diff.endswith("\n"):
-        diff += "\n"
-    return diff
+    if idx != -1:
+        t = t[idx:]
+
+    if t and not t.endswith("\n"):
+        t += "\n"
+    return t
+
+
+def looks_like_unified_diff(t: str) -> bool:
+    s = (t or "").lstrip()
+    if not s.startswith("diff --git"):
+        return False
+    # minimal structural checks
+    if "\n--- " not in s or "\n+++ " not in s:
+        return False
+    if "\n@@ " not in s:
+        return False
+    return True
 
 
 def _path_is_allowed(path: str) -> bool:
@@ -239,7 +276,6 @@ def apply_unified_diff(diff_text: str) -> None:
     if p.returncode == 0:
         return
 
-    # 3-way helps when a file already exists or context slightly differs
     p2 = subprocess.run(
         ["git", "apply", "--3way", "--whitespace=fix"],
         input=diff_text,
@@ -256,90 +292,140 @@ def apply_unified_diff(diff_text: str) -> None:
     )
 
 
+def llm_generate_diff(prompt: str) -> Tuple[str, str, str]:
+    """
+    Returns (diff_text_or_empty, llm_mode, raw_text).
+    """
+    raw, mode = llm_chat(prompt)
+    raw = raw or ""
+    cleaned = sanitize_llm_patch(raw)
+
+    if not cleaned.strip():
+        return "", mode, raw
+
+    if not looks_like_unified_diff(cleaned):
+        return "", mode, raw
+
+    cleaned = cleaned[:MAX_DIFF_CHARS]
+    return cleaned, mode, raw
+
+
 def attempt_llm_patch(
     issue_title: str, issue_body: str, ai_review: str
-) -> Tuple[bool, str, str]:
+) -> Tuple[bool, str, str, str]:
+    """
+    Returns (applied, mode, message, raw_preview)
+    """
     prompt = build_code_prompt(issue_title, issue_body, ai_review=ai_review)
-    llm_out, llm_mode = llm_chat(prompt)
-    diff_text = extract_unified_diff(llm_out)
+    diff_text, llm_mode, raw1 = llm_generate_diff(prompt)
 
-    # Retry once with extra-strict short prompt (helps with missing/garbled diff)
+    # Retry once with extra-strict short prompt
+    raw_used = raw1
     if not diff_text:
         retry_prompt = f"""
-        Return ONLY an APPLY-SAFE unified diff for `git apply`.
+Return ONLY an APPLY-SAFE unified diff for `git apply`.
 
-        Rules:
-        - First non-empty line MUST start with: diff --git a/
-        - No "index ", no "new file mode", no "deleted file mode".
-        - For new files use --- /dev/null and +++ b/<path>.
-        - Include @@ hunks.
+Rules:
+- First non-empty line MUST start with: diff --git a/
+- No "index ", no "new file mode", no "deleted file mode".
+- For new files use --- /dev/null and +++ b/<path>.
+- Include @@ hunks.
+- No markdown fences.
 
-        Example shape (do not copy paths blindly):
-        diff --git a/foo.py b/foo.py
-        --- a/foo.py
-        +++ b/foo.py
-        @@ -1,1 +1,2 @@
-        - old
-        + new
+Example shape (do not copy paths blindly):
+diff --git a/foo.py b/foo.py
+--- a/foo.py
++++ b/foo.py
+@@ -1,1 +1,2 @@
+- old
++ new
 
-        Now create the real diff for this task.
+Now produce the real diff.
 
-        Issue:
-        {issue_title}
-        {issue_body}
+Issue:
+{issue_title}
+{issue_body}
 
-        Review feedback to fix:
-        {ai_review}
+Review feedback to fix:
+{ai_review}
 
-        OUTPUT (diff only):
-        """.strip()
+OUTPUT (diff only):
+""".strip()
 
-        llm_out2, llm_mode2 = llm_chat(retry_prompt)
-        diff_text = extract_unified_diff(llm_out2)
+        diff_text, llm_mode2, raw2 = llm_generate_diff(retry_prompt)
         llm_mode = llm_mode2
+        raw_used = raw2
 
     if not diff_text:
-        return False, llm_mode, "no unified diff produced"
+        return (
+            False,
+            llm_mode,
+            "no unified diff produced (sanity check failed)",
+            _preview(raw_used),
+        )
 
-    diff_text = diff_text[:MAX_DIFF_CHARS]
     reason = diff_touches_forbidden(diff_text)
     if reason:
-        return False, llm_mode, f"patch rejected: {reason}"
+        return False, llm_mode, f"patch rejected: {reason}", _preview(raw_used)
 
     try:
         apply_unified_diff(diff_text)
-        return True, llm_mode, "patch applied"
+        return True, llm_mode, "patch applied", _preview(raw_used)
     except Exception as e:
-        # One repair retry: ask the model to regenerate an apply-safe diff
-        repair_prompt = (
-            "Your previous unified diff failed to apply.\n"
-            "Return a NEW apply-safe unified diff suitable for `git apply`.\n"
-            "Rules:\n"
-            "- Output ONLY unified diff starting with 'diff --git a/'.\n"
-            "- Do NOT include lines starting with: index , new file mode, deleted file mode.\n"
-            "- If a file already exists, MODIFY it. If it doesn't exist, CREATE it using /dev/null.\n"
-            "- Do not invent file names. Use __init__.py if a package init is needed.\n"
-            "No other text.\n\n"
-            f"Issue:\n{issue_title}\n{issue_body}\n\n"
-            f"AI review:\n{ai_review}\n"
-        )
-        llm_out3, llm_mode3 = llm_chat(repair_prompt)
-        diff3 = extract_unified_diff(llm_out3)
-        if diff3:
-            diff3 = diff3[:MAX_DIFF_CHARS]
-            reason2 = diff_touches_forbidden(diff3)
-            if not reason2:
-                try:
-                    apply_unified_diff(diff3)
-                    return True, llm_mode3, "patch applied (repair retry)"
-                except Exception as e2:
-                    return (
-                        False,
-                        llm_mode3,
-                        f"failed to apply patch after repair retry: {e2}",
-                    )
+        # Repair retry: ask model to regenerate apply-safe diff
+        repair_prompt = f"""
+Your previous output failed to apply.
 
-        return False, llm_mode, f"failed to apply patch: {e}"
+Return ONLY a NEW APPLY-SAFE unified diff suitable for `git apply`.
+
+Rules:
+- First non-empty line MUST start with: diff --git a/
+- No "index ", no "new file mode", no "deleted file mode".
+- No markdown fences.
+- If a file exists, MODIFY it.
+- If a file is missing, CREATE it using:
+  --- /dev/null
+  +++ b/<path>
+  and @@ hunks.
+
+Do not add any other text.
+
+Issue:
+{issue_title}
+{issue_body}
+
+AI review feedback:
+{ai_review}
+
+OUTPUT (diff only):
+""".strip()
+
+        diff3, llm_mode3, raw3 = llm_generate_diff(repair_prompt)
+        if not diff3:
+            return (
+                False,
+                llm_mode3,
+                f"failed to apply patch; repair retry produced no diff. original error: {e}",
+                _preview(raw3),
+            )
+
+        reason2 = diff_touches_forbidden(diff3)
+        if reason2:
+            return False, llm_mode3, f"repair patch rejected: {reason2}", _preview(raw3)
+
+        try:
+            apply_unified_diff(diff3)
+            return True, llm_mode3, "patch applied (repair retry)", _preview(raw3)
+        except Exception as e2:
+            return (
+                False,
+                llm_mode3,
+                f"failed to apply patch after repair retry: {e2}",
+                _preview(raw3),
+            )
+
+
+# -------------------- Main flows --------------------
 
 
 def handle_issue_mode(gh_repo, issue_number: int) -> None:
@@ -359,17 +445,17 @@ def handle_issue_mode(gh_repo, issue_number: int) -> None:
     # Always create issue snapshot for traceability
     created_path = write_ai_issue_file(issue_number, title, body)
 
-    applied, llm_mode, msg = attempt_llm_patch(title, body, ai_review="")
+    applied, llm_mode, msg, raw_preview = attempt_llm_patch(title, body, ai_review="")
     fmt_msg = maybe_format_with_black()
 
-    issue.create_comment(f"Code Agent: LLM mode={llm_mode}; {msg}. {fmt_msg}")
+    # Log to issue (traceability)
+    issue.create_comment(
+        f"Code Agent: LLM mode={llm_mode}; {msg}. {fmt_msg}\n\n"
+        f"LLM preview (first {LLM_PREVIEW_CHARS} chars):\n{raw_preview}"
+    )
 
     committed = commit_change(f"Implement Issue #{issue_number}")
-    if committed:
-        push_branch(branch)
-    else:
-        # Still push branch, because .ai snapshot may already exist and PR may rely on branch existing
-        push_branch(branch)
+    push_branch(branch)  # push regardless
 
     head = f"{owner}:{branch}"
     existing = find_existing_pr(gh_repo, head=head)
@@ -425,16 +511,16 @@ def handle_pr_iteration_mode(gh_repo, pr_number: int) -> None:
     branch = pr.head.ref
     checkout_remote_branch(branch)
 
-    applied, llm_mode, msg = attempt_llm_patch(
+    applied, llm_mode, msg, raw_preview = attempt_llm_patch(
         issue_title, issue_body, ai_review=ai_review
     )
     fmt_msg = maybe_format_with_black()
 
     if not applied:
-        # Important: don't burn an iteration if we didn't manage to change anything.
         pr.create_issue_comment(
-            f"Code Agent: LLM patch not applied (mode={llm_mode}): {msg}. {fmt_msg} "
-            "No changes committed; iteration not bumped."
+            f"Code Agent: LLM patch not applied (mode={llm_mode}): {msg}. {fmt_msg}\n"
+            "No changes committed; iteration not bumped.\n\n"
+            f"LLM preview (first {LLM_PREVIEW_CHARS} chars):\n{raw_preview}"
         )
         print(f"OK: no patch applied for PR #{pr_number}")
         return
@@ -442,7 +528,7 @@ def handle_pr_iteration_mode(gh_repo, pr_number: int) -> None:
     committed = commit_change(f"Fix based on AI review (iteration {current_iter + 1})")
     if not committed:
         pr.create_issue_comment(
-            f"Code Agent: patch applied but resulted in no net changes. {fmt_msg} "
+            f"Code Agent: patch applied but resulted in no net changes. {fmt_msg}\n"
             "Iteration not bumped."
         )
         print(f"OK: no net changes for PR #{pr_number}")
@@ -453,7 +539,8 @@ def handle_pr_iteration_mode(gh_repo, pr_number: int) -> None:
     next_iter = current_iter + 1
     pr.edit(body=bump_iteration(pr.body or "", next_iter))
     pr.create_issue_comment(
-        f"Code Agent: iteration {next_iter} pushed updates. LLM mode={llm_mode}; {msg}. {fmt_msg}"
+        f"Code Agent: iteration {next_iter} pushed updates. "
+        f"LLM mode={llm_mode}; {msg}. {fmt_msg}"
     )
 
     print(f"OK: updated PR #{pr_number} iteration {next_iter}")

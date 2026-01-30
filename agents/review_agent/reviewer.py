@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
-from github import Github
+from github import Auth, Github
 
 from agents.llm_client import llm_chat
 
@@ -39,9 +39,7 @@ def ensure_label(repo, name: str, color: str) -> None:
     try:
         repo.get_label(name)
     except Exception:
-        repo.create_label(
-            name=name, color=color, description="Auto label by AI reviewer"
-        )
+        repo.create_label(name=name, color=color, description="Auto label by AI reviewer")
 
 
 def extract_issue_number(pr_body: str) -> Optional[int]:
@@ -53,13 +51,14 @@ def ci_state_for_pr(repo, pr) -> Optional[str]:
     """Best-effort combined status for PR head SHA."""
     try:
         combined = repo.get_commit(pr.head.sha).get_combined_status()
-        return combined.state  # success|failure|error|pending
+        # success|failure|error|pending
+        return combined.state
     except Exception:
         return None
 
 
 def pr_has_substantive_changes(pr) -> bool:
-    """True if PR changes something outside .ai/."""
+    """True if PR changes something outside .ai/ (scaffold-only check)."""
     for f in pr.get_files():
         if f.filename.startswith(".ai/"):
             continue
@@ -77,14 +76,26 @@ def collect_pr_diff(pr, max_chars: int = 8000) -> str:
         parts.append(f.patch if f.patch else "[no patch available]")
         parts.append("")
     text = "\n".join(parts)
-    return (
-        text if len(text) <= max_chars else (text[:max_chars] + "\n...[TRUNCATED]...")
-    )
+    return text if len(text) <= max_chars else (text[:max_chars] + "\n...[TRUNCATED]...")
 
 
 def clamp(text: str, max_len: int) -> str:
     t = (text or "").strip()
     return t if len(t) <= max_len else (t[:max_len] + "\n...[TRUNCATED]...")
+
+
+def read_log_tail(path: str, max_chars: int = 2500) -> str:
+    p = (path or "").strip()
+    if not p:
+        return ""
+    try:
+        with open(p, "r", encoding="utf-8", errors="ignore") as f:
+            data = f.read().strip()
+        if len(data) > max_chars:
+            return data[-max_chars:]
+        return data
+    except Exception:
+        return ""
 
 
 def parse_llm_status(llm_out: str) -> Optional[str]:
@@ -173,22 +184,45 @@ def evaluate(repo, pr) -> ReviewResult:
             issues.append(f"Issue #{issue_no} not found or not accessible.")
             suggestions.append("Ensure PR references an existing Issue.")
 
+    # --- CI state (combined status) ---
     ci_state = ci_state_for_pr(repo, pr)
 
-    # Hard gate: failing CI
-    if ci_state in ("failure", "error"):
-        issues.append(f"CI is failing ({ci_state}).")
-        suggestions.append("Fix CI failures and push updates.")
+    # --- CI details from workflow env (preferred, because it includes logs) ---
+    pytest_exit = (os.getenv("PYTEST_EXIT_CODE") or "").strip()
+    black_exit = (os.getenv("BLACK_EXIT_CODE") or "").strip()
+    pytest_log_path = (os.getenv("PYTEST_LOG_PATH") or "").strip()
+    black_log_path = (os.getenv("BLACK_LOG_PATH") or "").strip()
+
+    if pytest_exit and pytest_exit != "0":
+        issues.append("Pytest failed (tests are red).")
+        suggestions.append("Fix failing tests and push updates.")
+        tail = read_log_tail(pytest_log_path, max_chars=2500)
+        if tail:
+            suggestions.append("Pytest log tail:")
+            suggestions.append(tail)
+
+    if black_exit and black_exit != "0":
+        issues.append("Black check failed (formatting).")
+        suggestions.append("Run black and commit formatted changes.")
+        tail = read_log_tail(black_log_path, max_chars=1500)
+        if tail:
+            suggestions.append("Black log tail:")
+            suggestions.append(tail)
+
+    # If we DON'T have explicit exit codes, fall back to combined status.
+    if not pytest_exit and not black_exit:
+        if ci_state in ("failure", "error"):
+            issues.append(f"CI is failing ({ci_state}).")
+            suggestions.append("Fix CI failures and push updates.")
+        if ci_state == "pending":
+            suggestions.append("CI is still running (pending). Wait for CI to finish.")
 
     # Hard-ish gate: scaffold-only PR
     if not pr_has_substantive_changes(pr):
         issues.append("PR has no substantive changes outside .ai/ (scaffold-only).")
         suggestions.append("Implement the requested functionality in code changes.")
 
-    if ci_state == "pending":
-        suggestions.append("CI is still running (pending). Wait for CI to finish.")
-
-    # Start with deterministic status
+    # Deterministic status first
     status = "approved" if not issues else "needs-fix"
 
     # LLM semantic review:
@@ -234,8 +268,6 @@ suggestions:
     if status == "approved" and llm_status == "needs-fix":
         status = "needs-fix"
         issues.append("LLM review: requirements likely not met.")
-    elif status == "approved" and llm_status == "approved":
-        status = "approved"
 
     return ReviewResult(
         status=status,
@@ -251,7 +283,7 @@ def main() -> None:
     parser.add_argument("--pr", type=int, required=True)
     args = parser.parse_args()
 
-    gh = Github(get_token())
+    gh = Github(auth=Auth.Token(get_token()))
     repo = gh.get_repo(get_repo_full_name())
     pr = repo.get_pull(args.pr)
 
@@ -266,9 +298,6 @@ def main() -> None:
         pr.create_issue_comment(body)
         pr.create_review(body=body, event="COMMENT")
 
-        # Apply labels:
-        # - if needs-fix, always set/touch to trigger Code Agent
-        # - if approved, set approved label
         apply_labels(pr, res.status)
 
         print(f"OK: Reviewed PR #{args.pr} -> {res.status}")

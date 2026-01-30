@@ -167,36 +167,47 @@ def _call_hf_inference(cfg: LLMConfig, prompt: str) -> str:
 def llm_chat(prompt: str) -> Tuple[str, str]:
     """
     Returns (text, mode_used). Never raises due to provider problems (safe for CI).
+
+    If provider fails, returns empty text and mode like 'openai_chat:error(429)'.
     """
     cfg = load_llm_config()
 
-    # default: mock if no base_url/api_key or mode is mock
     if cfg.mode == "mock" or not cfg.base_url:
         return MOCK_TEXT, "mock"
 
-    try:
-        if cfg.mode == "openai_chat":
-            return _call_openai_chat(cfg, prompt), "openai_chat"
-        if cfg.mode == "ollama_chat":
-            return _call_ollama_chat(cfg, prompt), "ollama_chat"
-        if cfg.mode == "hf_inference":
-            return _call_hf_inference(cfg, prompt), "hf_inference"
-        if cfg.mode == "custom_http":
-            # You can implement later; for now do not fail CI.
+    def retryable(status: Optional[int]) -> bool:
+        return status in (429, 500, 502, 503, 504)
+
+    for attempt in range(2):
+        try:
+            if cfg.mode == "openai_chat":
+                return _call_openai_chat(cfg, prompt), "openai_chat"
+            if cfg.mode == "ollama_chat":
+                return _call_ollama_chat(cfg, prompt), "ollama_chat"
+            if cfg.mode == "hf_inference":
+                return _call_hf_inference(cfg, prompt), "hf_inference"
+            if cfg.mode == "custom_http":
+                return (
+                    MOCK_TEXT
+                    + "\nsuggestions:\n- LLM disabled: custom_http is not implemented.\n",
+                    "custom_http:disabled",
+                )
+
             return (
                 MOCK_TEXT
-                + "\nsuggestions:\n- LLM disabled: custom_http is not implemented.\n",
-                "mock",
+                + f"\nsuggestions:\n- LLM disabled: unknown mode '{cfg.mode}'.\n",
+                f"{cfg.mode}:disabled",
             )
 
-        # Unknown mode -> safe fallback
-        return (
-            MOCK_TEXT + f"\nsuggestions:\n- LLM disabled: unknown mode '{cfg.mode}'.\n",
-            "mock",
-        )
-    except Exception as e:
-        # Never fail CI due to LLM issues
-        return (
-            MOCK_TEXT + f"\nsuggestions:\n- LLM not used: {e}\n",
-            "mock",
-        )
+        except requests.HTTPError as e:
+            status = getattr(e.response, "status_code", None)
+            if attempt == 0 and retryable(status):
+                continue
+            return "", f"{cfg.mode}:error({status})"
+
+        except Exception:
+            if attempt == 0:
+                continue
+            return "", f"{cfg.mode}:error"
+
+    return "", f"{cfg.mode}:error"

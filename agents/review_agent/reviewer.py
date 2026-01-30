@@ -143,16 +143,34 @@ def write_job_summary(res: ReviewResult) -> None:
 
 
 def apply_labels(pr, res: ReviewResult) -> None:
-    current = [lbl.name for lbl in pr.get_labels()]
+    current = {lbl.name for lbl in pr.get_labels()}
+
+    def safe_remove(name: str) -> None:
+        if name in current:
+            try:
+                pr.remove_from_labels(name)
+            except Exception:
+                pass
+
+    def safe_add(name: str) -> None:
+        try:
+            pr.add_to_labels(name)
+        except Exception:
+            pass
 
     if res.status == "approved":
-        if NEEDS_FIX_LABEL in current:
-            pr.remove_from_labels(NEEDS_FIX_LABEL)
-        pr.add_to_labels(APPROVED_LABEL)
-    else:
-        if APPROVED_LABEL in current:
-            pr.remove_from_labels(APPROVED_LABEL)
-        pr.add_to_labels(NEEDS_FIX_LABEL)
+        # Ensure needs-fix is removed, approved is present
+        safe_remove(NEEDS_FIX_LABEL)
+        safe_add(APPROVED_LABEL)
+        return
+
+    # res.status == "needs-fix"
+    # Ensure approved is removed
+    safe_remove(APPROVED_LABEL)
+
+    # IMPORTANT: "touch" the label to re-trigger pull_request:labeled every iteration
+    safe_remove(NEEDS_FIX_LABEL)
+    safe_add(NEEDS_FIX_LABEL)
 
 
 def collect_pr_diff(pr, max_chars: int = 20000) -> str:

@@ -164,32 +164,44 @@ def repo_file_tree(max_files: int = 250) -> str:
 def build_code_prompt(issue_title: str, issue_body: str, ai_review: str) -> str:
     tree = repo_file_tree()
     return f"""
-You are a coding agent operating in a Git repository.
+    You are a coding agent in a Git repository.
 
-Goal:
-Implement the requirements from the Issue. If reviewer notes exist, fix them.
+    You MUST output ONLY a unified diff that starts with the line:
+    diff --git a/...
 
-Output requirement:
-Return ONLY a unified diff (git patch). No explanations. No markdown fences.
+    No explanations. No markdown. No extra text.
 
-Hard constraints:
-- Do NOT modify these paths: {DENY_PATH_PREFIXES} and exact files {DENY_EXACT}
-- Allowed paths are limited to prefixes: {ALLOWED_PATH_PREFIXES} and exact files {ALLOWED_EXACT}
-- Keep changes minimal, correct, and runnable.
-- If you cannot propose a patch, output an empty string.
+    If you cannot comply, output an empty string.
 
-Repository file list (partial):
-{tree}
+    Hard constraints:
+    - Do NOT modify these paths: {DENY_PATH_PREFIXES} and exact files {DENY_EXACT}
+    - Allowed paths are limited to prefixes: {ALLOWED_PATH_PREFIXES} and exact files {ALLOWED_EXACT}
 
-Issue title:
-{issue_title}
+    Target task:
+    Implement the Issue requirements. If reviewer notes exist, fix them.
 
-Issue body:
-{issue_body}
+    Repository file list (partial):
+    {tree}
 
-Reviewer notes (may be empty):
-{ai_review}
-""".strip()
+    Issue title:
+    {issue_title}
+
+    Issue body:
+    {issue_body}
+
+    Reviewer notes:
+    {ai_review}
+
+    Example output format (you must follow it exactly):
+    diff --git a/src/utils.py b/src/utils.py
+    index 0000000..1111111 100644
+    --- a/src/utils.py
+    +++ b/src/utils.py
+    @@ -0,0 +1,5 @@
+    +def add(a: int, b: int) -> int:
+    +    \"\"\"Return the sum of two integers.\"\"\"
+    +    return a + b
+    """.strip()
 
 
 def extract_unified_diff(text: str) -> str:

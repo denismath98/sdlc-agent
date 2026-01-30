@@ -1,0 +1,13 @@
+services:
+  sdlc-agent:
+    build: .
+    image: sdlc-agent:latest
+    environment:
+      # for local runs you can set these in .env
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GITHUB_REPOSITORY=${GITHUB_REPOSITORY:-}
+      - LLM_CONFIG_JSON=${LLM_CONFIG_JSON:-}
+      - REPO_PATH=/repo
+    volumes:
+      # mount target repo here
+      - ${TARGET_REPO_PATH:-./}:/repo

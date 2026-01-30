@@ -1,0 +1,15 @@
+{
+  "mode": "openai_chat",
+  "base_url": "https://router.huggingface.co",
+  "api_key": "",
+  "model": "openai/gpt-oss-120b:fastest",
+  "timeout_s": 30,
+  "temperature": 0.2,
+  "max_tokens": 2000,
+  "headers": {
+    "Authorization": "Bearer ${api_key}"
+  },
+  "endpoints": {
+    "chat_completions": "/v1/chat/completions"
+  }
+}

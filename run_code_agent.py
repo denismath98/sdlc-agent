@@ -146,10 +146,22 @@ def write_ai_issue_file(issue_number: int, title: str, body: str) -> str:
 # -------------------- LLM patch generation helpers --------------------
 
 
-def repo_file_tree(max_files: int = 250) -> str:
+def repo_file_tree(max_files: int = 120) -> str:
+    """
+    IMPORTANT: keep this small to avoid huge prompts that cause HF Router to return reasoning only.
+    """
     files = sh(["git", "ls-files"]).splitlines()
     files = [f for f in files if not f.startswith("build/")]
-    return "\n".join(files[:max_files])
+    # Prefer likely relevant dirs first
+    preferred = []
+    rest = []
+    for f in files:
+        if f.startswith(("src/", "tests/", "agents/")):
+            preferred.append(f)
+        else:
+            rest.append(f)
+    ordered = preferred + rest
+    return "\n".join(ordered[:max_files])
 
 
 def build_code_prompt(issue_title: str, issue_body: str, ai_review: str) -> str:
@@ -163,12 +175,11 @@ DEVELOPER (ABSOLUTE RULES):
 - Output ONLY a unified diff. No explanations. No markdown. No code fences.
 - The FIRST non-empty line MUST start with: diff --git a/
 - Do NOT include lines starting with: "index ", "new file mode", "deleted file mode".
-- For new files: use ONLY:
-  diff --git a/<path> b/<path>
+- For new files: you MUST use exactly:
   --- /dev/null
   +++ b/<path>
-  @@ ...
-  +<content>
+  and include @@ hunks.
+- NEVER output '--- dev/null' (without slash).
 - Every changed file MUST have at least one @@ hunk.
 - Keep changes minimal and directly related to the Issue / review feedback.
 - If you cannot comply, output an empty string.
@@ -191,13 +202,7 @@ Issue body:
 Latest AI review feedback (fix these issues if present):
 {ai_review}
 
-Before you write the diff, silently decide:
-1) Which files to change/create (prefer as few as possible).
-2) What minimal code is needed to satisfy the Issue.
-3) What tests to add/update if required.
-Do NOT output the plan, only output the diff.
-
-OUTPUT (diff only):
+Output ONLY the diff:
 """.strip()
 
 
@@ -209,24 +214,12 @@ def _preview(text: str, n: int = LLM_PREVIEW_CHARS) -> str:
 
 
 def sanitize_llm_patch(text: str) -> str:
-    """
-    Make LLM output more likely to be a clean diff:
-    - normalize newlines
-    - remove common markdown fences
-    - remove leading text before 'diff --git'
-    """
     t = (text or "").replace("\r\n", "\n").strip()
-
-    # Remove markdown fences commonly produced by LLM
     if "```" in t:
         t = t.replace("```diff", "").replace("```", "").strip()
-
-    # Sometimes LLM adds "OUTPUT:" or other headers
-    # Keep only from first 'diff --git'
     idx = t.find("diff --git")
     if idx != -1:
         t = t[idx:]
-
     if t and not t.endswith("\n"):
         t += "\n"
     return t
@@ -236,7 +229,6 @@ def looks_like_unified_diff(t: str) -> bool:
     s = (t or "").lstrip()
     if not s.startswith("diff --git"):
         return False
-    # minimal structural checks
     if "\n--- " not in s or "\n+++ " not in s:
         return False
     if "\n@@ " not in s:
@@ -252,8 +244,17 @@ def _path_is_allowed(path: str) -> bool:
 
 def diff_touches_forbidden(diff_text: str) -> Optional[str]:
     for line in diff_text.splitlines():
-        if line.startswith("+++ b/") or line.startswith("--- a/"):
-            path = line[6:]
+        if (
+            line.startswith("+++ b/")
+            or line.startswith("--- a/")
+            or line.startswith("--- /dev/null")
+        ):
+            if line.startswith("--- /dev/null"):
+                continue
+            if line.startswith("+++ b/"):
+                path = line[6:]
+            else:
+                path = line[6:]
             if not path or path == "/dev/null":
                 continue
             if path in DENY_EXACT:
@@ -265,8 +266,20 @@ def diff_touches_forbidden(diff_text: str) -> Optional[str]:
     return None
 
 
+def normalize_dev_null(diff_text: str) -> str:
+    """
+    Fix a very common LLM mistake: '--- dev/null' instead of '--- /dev/null'.
+    This prevents git apply from treating dev/null as a repo path.
+    """
+    diff_text = re.sub(r"(?m)^---\s+dev/null\s*$", "--- /dev/null", diff_text)
+    diff_text = re.sub(r"(?m)^\+\+\+\s+dev/null\s*$", "+++ /dev/null", diff_text)
+    return diff_text
+
+
 def apply_unified_diff(diff_text: str) -> None:
     """Apply a unified diff to the working tree. Tries normal apply, then 3-way."""
+    diff_text = normalize_dev_null(diff_text)
+
     p = subprocess.run(
         ["git", "apply", "--whitespace=fix"],
         input=diff_text,
@@ -293,16 +306,12 @@ def apply_unified_diff(diff_text: str) -> None:
 
 
 def llm_generate_diff(prompt: str) -> Tuple[str, str, str]:
-    """
-    Returns (diff_text_or_empty, llm_mode, raw_text).
-    """
     raw, mode = llm_chat(prompt)
     raw = raw or ""
     cleaned = sanitize_llm_patch(raw)
 
     if not cleaned.strip():
         return "", mode, raw
-
     if not looks_like_unified_diff(cleaned):
         return "", mode, raw
 
@@ -318,9 +327,8 @@ def attempt_llm_patch(
     """
     prompt = build_code_prompt(issue_title, issue_body, ai_review=ai_review)
     diff_text, llm_mode, raw1 = llm_generate_diff(prompt)
-
-    # Retry once with extra-strict short prompt
     raw_used = raw1
+
     if not diff_text:
         retry_prompt = f"""
 Return ONLY an APPLY-SAFE unified diff for `git apply`.
@@ -328,19 +336,12 @@ Return ONLY an APPLY-SAFE unified diff for `git apply`.
 Rules:
 - First non-empty line MUST start with: diff --git a/
 - No "index ", no "new file mode", no "deleted file mode".
-- For new files use --- /dev/null and +++ b/<path>.
+- For new files you MUST use exactly:
+  --- /dev/null
+  +++ b/<path>
+- NEVER output '--- dev/null' (without slash).
 - Include @@ hunks.
 - No markdown fences.
-
-Example shape (do not copy paths blindly):
-diff --git a/foo.py b/foo.py
---- a/foo.py
-+++ b/foo.py
-@@ -1,1 +1,2 @@
-- old
-+ new
-
-Now produce the real diff.
 
 Issue:
 {issue_title}
@@ -372,7 +373,6 @@ OUTPUT (diff only):
         apply_unified_diff(diff_text)
         return True, llm_mode, "patch applied", _preview(raw_used)
     except Exception as e:
-        # Repair retry: ask model to regenerate apply-safe diff
         repair_prompt = f"""
 Your previous output failed to apply.
 
@@ -383,12 +383,11 @@ Rules:
 - No "index ", no "new file mode", no "deleted file mode".
 - No markdown fences.
 - If a file exists, MODIFY it.
-- If a file is missing, CREATE it using:
+- If a file is missing, CREATE it using exactly:
   --- /dev/null
   +++ b/<path>
   and @@ hunks.
-
-Do not add any other text.
+- NEVER output '--- dev/null' (without slash).
 
 Issue:
 {issue_title}
@@ -442,20 +441,18 @@ def handle_issue_mode(gh_repo, issue_number: int) -> None:
     checkout_default_branch(base_branch)
     sh(["git", "checkout", "-B", branch])
 
-    # Always create issue snapshot for traceability
     created_path = write_ai_issue_file(issue_number, title, body)
 
     applied, llm_mode, msg, raw_preview = attempt_llm_patch(title, body, ai_review="")
     fmt_msg = maybe_format_with_black()
 
-    # Log to issue (traceability)
     issue.create_comment(
         f"Code Agent: LLM mode={llm_mode}; {msg}. {fmt_msg}\n\n"
         f"LLM preview (first {LLM_PREVIEW_CHARS} chars):\n{raw_preview}"
     )
 
     committed = commit_change(f"Implement Issue #{issue_number}")
-    push_branch(branch)  # push regardless
+    push_branch(branch)
 
     head = f"{owner}:{branch}"
     existing = find_existing_pr(gh_repo, head=head)

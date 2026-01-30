@@ -9,6 +9,19 @@ on:
 
 jobs:
   code-agent:
+name: Code Agent (Issue -> PR / Iteration)
+
+on:
+  issues:
+    types: [opened]
+
+  pull_request:
+    types: [labeled, synchronize, reopened]
+
+  workflow_dispatch:
+
+jobs:
+  code-agent:
     if: |
       github.event_name == 'issues' ||
       (
@@ -25,8 +38,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
+    # ВАЖНО: без run_id, иначе группа будет каждый раз новая
     concurrency:
-      group: code-agent-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
+      group: code-agent-${{ github.event.pull_request.number || github.event.issue.number }}
       cancel-in-progress: true
 
     permissions:

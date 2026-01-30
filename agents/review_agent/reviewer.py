@@ -236,27 +236,27 @@ def evaluate(repo, pr) -> ReviewResult:
     issue_text = clamp(issue_text, 2000)
 
     prompt = f"""
-You are a strict code reviewer.
+    Ты — строгий code reviewer.
 
-Definition of DONE:
-- The PR is DONE only if the PR diff clearly implements the Issue requirements.
-- If you cannot confirm implementation from the diff, you MUST return needs-fix.
-- Be strict. No guessing.
+    Определение DONE:
+    - PR считается DONE только если по diff видно, что требования Issue реализованы.
+    - Если по diff нельзя уверенно подтвердить реализацию — обязательно status=needs-fix.
+    - Будь строгим. Не додумывай.
 
-Issue:
-{issue_text}
+    Issue:
+    {issue_text}
 
-PR diff:
-{diff_text}
+    PR diff:
+    {diff_text}
 
-Return EXACTLY:
+    Верни СТРОГО в формате:
 
-status=approved|needs-fix
-issues:
-- ...
-suggestions:
-- ...
-""".strip()
+    status=approved|needs-fix
+    issues:
+    - ...
+    suggestions:
+    - ...
+    """.strip()
 
     llm_out, llm_mode = llm_chat(prompt)
     llm_out = (llm_out or "").strip()
@@ -300,7 +300,7 @@ def main() -> None:
 
         write_job_summary(res)
         pr.create_issue_comment(body)
-        pr.create_review(body=body, event="COMMENT")
+        # pr.create_review(body=body, event="COMMENT")
 
         apply_labels(pr, res.status)
 

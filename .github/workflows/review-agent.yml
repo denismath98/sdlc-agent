@@ -5,16 +5,35 @@ on:
     types: [opened, synchronize, reopened]
 
 jobs:
+name: PR CI + AI Reviewer
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
   ci:
     runs-on: ubuntu-latest
+
+    concurrency:
+      group: sdlc-pr-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+
     outputs:
       pytest_exit: ${{ steps.pytest_out.outputs.exit_code }}
       black_exit: ${{ steps.black_out.outputs.exit_code }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
@@ -68,15 +87,17 @@ jobs:
     needs: ci
     runs-on: ubuntu-latest
     if: always()
-    permissions:
-      pull-requests: write
-      issues: write
-      contents: read
+
+    concurrency:
+      group: sdlc-pr-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 

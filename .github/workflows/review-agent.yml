@@ -53,5 +53,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GH_PAT }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          LLM_CONFIG_JSON: ${{ secrets.LLM_CONFIG_JSON }}
         run: |
           python agents/review_agent/reviewer.py --pr "${{ github.event.pull_request.number }}"

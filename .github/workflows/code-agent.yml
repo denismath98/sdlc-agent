@@ -50,6 +50,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GH_PAT }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          LLM_CONFIG_JSON: ${{ secrets.LLM_CONFIG_JSON }}
         run: |
           if [ "${{ github.event_name }}" = "issues" ]; then
             python run_code_agent.py --issue "${{ github.event.issue.number }}"

@@ -268,11 +268,18 @@ def diff_touches_forbidden(diff_text: str) -> Optional[str]:
 
 def normalize_dev_null(diff_text: str) -> str:
     """
-    Fix a very common LLM mistake: '--- dev/null' instead of '--- /dev/null'.
-    This prevents git apply from treating dev/null as a repo path.
+    Fix common LLM mistakes around /dev/null.
+    Ensures old-file marker for new files is exactly '--- /dev/null'.
     """
-    diff_text = re.sub(r"(?m)^---\s+dev/null\s*$", "--- /dev/null", diff_text)
-    diff_text = re.sub(r"(?m)^\+\+\+\s+dev/null\s*$", "+++ /dev/null", diff_text)
+    diff_text = diff_text.replace("\r\n", "\n")
+
+    # Strictly fix old/new file markers when they appear at line start
+    diff_text = re.sub(r"(?m)^---\s+(a/)?dev/null\s*$", "--- /dev/null", diff_text)
+    diff_text = re.sub(r"(?m)^\+\+\+\s+(b/)?dev/null\s*$", "+++ /dev/null", diff_text)
+
+    # Also fix any accidental '--- dev/null' with trailing spaces
+    diff_text = re.sub(r"(?m)^---\s+dev/null(\s+.*)?$", "--- /dev/null", diff_text)
+
     return diff_text
 
 
@@ -281,27 +288,26 @@ def repair_unified_diff(diff_text: str) -> str:
     Repair common LLM mistakes that make `git apply` fail with 'corrupt patch':
     - Lines inside hunks missing the leading '+', '-', or ' ' prefix.
     - Blank lines inside hunks should be '+' (added empty line).
+    - Prevent accidental file-header-like lines inside hunks.
     """
     lines = diff_text.replace("\r\n", "\n").splitlines()
     out: list[str] = []
 
     in_hunk = False
     for line in lines:
-        # Start of file diff resets hunk context
         if line.startswith("diff --git "):
             in_hunk = False
             out.append(line)
             continue
 
-        # Hunk header
-        if line.startswith("@@ "):
-            in_hunk = True
+        if line.startswith(("--- ", "+++ ")):
+            # file headers are not part of hunks
+            in_hunk = False
             out.append(line)
             continue
 
-        # File headers / metadata end hunk mode until next @@
-        if line.startswith(("--- ", "+++ ")):
-            in_hunk = False
+        if line.startswith("@@ "):
+            in_hunk = True
             out.append(line)
             continue
 
@@ -309,17 +315,21 @@ def repair_unified_diff(diff_text: str) -> str:
             out.append(line)
             continue
 
-        # We are inside a hunk:
+        # Inside hunk: valid prefixes are + - space or \ (no newline marker)
         if line.startswith(("+", "-", " ", "\\")):
             out.append(line)
             continue
 
-        # A blank line inside a hunk should be an added blank line
+        # If model accidentally emits file-header-like lines inside a hunk,
+        # force them to be treated as added text.
+        if line.startswith(("--- ", "+++ ", "diff --git ")):
+            out.append("+" + line)
+            continue
+
         if line.strip() == "":
             out.append("+")
             continue
 
-        # Otherwise: missing prefix, treat as added line
         out.append("+" + line)
 
     fixed = "\n".join(out)

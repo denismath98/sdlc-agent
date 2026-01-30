@@ -1,1 +1,1 @@
-# This file makes the src directory a package.
+# This package contains word count utilities.

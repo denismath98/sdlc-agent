@@ -16,7 +16,7 @@ def count_lines(text: str) -> int:
     """Return the number of lines in *text*.
 
     An empty string has 0 lines. If the text does not end with a newline
-    but is not empty, it is counted as a line.
+    but is non‑empty, it counts as an additional line.
     """
     if not text:
         return 0
@@ -25,37 +25,34 @@ def count_lines(text: str) -> int:
 
 
 def count_chars(text: str) -> int:
-    """Return the total number of characters in *text*."""
+    """Return the total number of characters in *text*, including whitespace."""
     return len(text)
 
 
-def _read_input(text: Optional[str], file_path: Optional[Path]) -> str:
-    if text is not None:
-        return text
-    if file_path is not None:
-        return file_path.read_text(encoding="utf-8")
-    raise ValueError("Either --text or --file must be provided.")
+def _read_input(args: argparse.Namespace) -> str:
+    if args.text is not None:
+        return args.text
+    if args.file is not None:
+        path = Path(args.file)
+        return path.read_text(encoding="utf-8")
+    return ""
 
 
-def main(argv: Optional[list] = None) -> None:
+def main(argv: Optional[list[str]] = None) -> None:
     parser = argparse.ArgumentParser(description="WordCount Pro CLI")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--text", type=str, help="Text to analyse")
-    group.add_argument("--file", type=Path, help="Path to a UTF‑8 encoded text file")
+    group.add_argument("--file", type=str, help="Path to a UTF‑8 encoded file")
     args = parser.parse_args(argv)
 
-    try:
-        content = _read_input(args.text, args.file)
-    except Exception as exc:  # pragma: no cover
-        parser.error(str(exc))
+    text = _read_input(args)
 
-    words = count_words(content)
-    lines = count_lines(content)
-    chars = count_chars(content)
+    words = count_words(text)
+    lines = count_lines(text)
+    chars = count_chars(text)
 
-    sys.stdout.write(f"words={words}\\n")
-    sys.stdout.write(f"lines={lines}\\n")
-    sys.stdout.write(f"chars={chars}\\n")
+    output = f"words={words}\nlines={lines}\nchars={chars}"
+    print(output)
 
 
 if __name__ == "__main__":

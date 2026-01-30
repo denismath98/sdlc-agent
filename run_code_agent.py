@@ -151,21 +151,22 @@ def build_code_prompt(issue_title: str, issue_body: str, ai_review: str) -> str:
     tree = repo_file_tree()
     return f"""
 SYSTEM:
-You are a coding agent working inside a Git repository.
+You are a senior software engineer acting as a GitHub Code Agent.
+You MUST output only an APPLY-SAFE unified diff that can be applied with `git apply`.
 
-DEVELOPER (MANDATORY OUTPUT FORMAT):
-- Output ONLY a valid unified diff suitable for `git apply`.
+DEVELOPER (ABSOLUTE RULES):
+- Output ONLY a unified diff. No explanations. No markdown. No code fences.
 - The FIRST non-empty line MUST start with: diff --git a/
-- Do NOT output any other text, explanation, markdown, or code fences.
-- If you cannot produce a valid diff, output an empty string.
-
-APPLY-SAFETY RULES (IMPORTANT):
 - Do NOT include lines starting with: "index ", "new file mode", "deleted file mode".
-- For new files, use ONLY:
+- For new files: use ONLY:
+  diff --git a/<path> b/<path>
   --- /dev/null
   +++ b/<path>
-  and standard @@ hunks.
-- Do not invent file names. If a Python package init is needed, use __init__.py (double underscores).
+  @@ ...
+  +<content>
+- Every changed file MUST have at least one @@ hunk.
+- Keep changes minimal and directly related to the Issue / review feedback.
+- If you cannot comply, output an empty string.
 
 Safety constraints:
 - Forbidden exact files: {DENY_EXACT}
@@ -182,12 +183,16 @@ Issue title:
 Issue body:
 {issue_body}
 
-Latest AI review feedback (if any):
+Latest AI review feedback (fix these issues if present):
 {ai_review}
 
-Task:
-Implement the Issue requirements. If the AI review points out mismatches or missing work, fix them.
-Remember: output ONLY unified diff starting with 'diff --git'.
+Before you write the diff, silently decide:
+1) Which files to change/create (prefer as few as possible).
+2) What minimal code is needed to satisfy the Issue.
+3) What tests to add/update if required.
+Do NOT output the plan, only output the diff.
+
+OUTPUT (diff only):
 """.strip()
 
 
@@ -260,14 +265,35 @@ def attempt_llm_patch(
 
     # Retry once with extra-strict short prompt (helps with missing/garbled diff)
     if not diff_text:
-        retry_prompt = (
-            "Output ONLY unified diff for `git apply`.\n"
-            "First non-empty line MUST start with: diff --git a/\n"
-            "Do NOT include lines starting with: index , new file mode, deleted file mode.\n"
-            "No other text.\n\n"
-            f"Issue:\n{issue_title}\n{issue_body}\n\n"
-            f"AI review:\n{ai_review}\n"
-        )
+        retry_prompt = f"""
+        Return ONLY an APPLY-SAFE unified diff for `git apply`.
+
+        Rules:
+        - First non-empty line MUST start with: diff --git a/
+        - No "index ", no "new file mode", no "deleted file mode".
+        - For new files use --- /dev/null and +++ b/<path>.
+        - Include @@ hunks.
+
+        Example shape (do not copy paths blindly):
+        diff --git a/foo.py b/foo.py
+        --- a/foo.py
+        +++ b/foo.py
+        @@ -1,1 +1,2 @@
+        - old
+        + new
+
+        Now create the real diff for this task.
+
+        Issue:
+        {issue_title}
+        {issue_body}
+
+        Review feedback to fix:
+        {ai_review}
+
+        OUTPUT (diff only):
+        """.strip()
+
         llm_out2, llm_mode2 = llm_chat(retry_prompt)
         diff_text = extract_unified_diff(llm_out2)
         llm_mode = llm_mode2

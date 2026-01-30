@@ -4,20 +4,19 @@ from pathlib import Path
 
 
 def count_words(text: str) -> int:
-    """Return the number of words in the given text."""
+    """Count the number of words in the given text."""
+    # Split on any whitespace and filter out empty strings
     return len([w for w in text.split() if w])
 
 
 def count_lines(text: str) -> int:
-    """Return the number of lines in the given text."""
-    if not text:
-        return 0
-    # splitlines handles different newline conventions
+    """Count the number of lines in the given text."""
+    # splitlines handles different newline conventions and does not keep linebreaks
     return len(text.splitlines())
 
 
 def count_chars(text: str) -> int:
-    """Return the number of characters in the given text."""
+    """Count the number of characters in the given text."""
     return len(text)
 
 
@@ -46,15 +45,18 @@ def main(argv=None):
     try:
         text = args.file.read_text(encoding="utf-8")
     except Exception as e:
-        print(f"Error reading file {args.file}: {e}", file=sys.stderr)
+        sys.stderr.write(f"Error reading file {args.file}: {e}\n")
         sys.exit(1)
 
     if args.mode == "words":
         result = count_words(text)
     elif args.mode == "lines":
         result = count_lines(text)
-    else:  # chars
+    elif args.mode == "chars":
         result = count_chars(text)
+    else:
+        sys.stderr.write(f"Unsupported mode: {args.mode}\n")
+        sys.exit(1)
 
     print(result)
 

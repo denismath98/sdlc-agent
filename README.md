@@ -1,17 +1,13 @@
-# Word Count CLI
+# Project Title
 
-A simple utility to count words, lines, or characters in a text file.
+A brief description of the project.
 
-## Installation
+## Word Count CLI
 
-```bash
-pip install -r requirements.txt
-```
-
-## Usage
+Count words, lines, or characters in a file.
 
 ```bash
 python -m src.wordcount --file path/to/file.txt --mode words
 ```
 
-Replace `words` with `lines` or `chars` to count lines or characters respectively.
+Supported modes: `words`, `lines`, `chars`.

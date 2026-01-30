@@ -120,7 +120,41 @@ def _call_openai_chat(cfg: LLMConfig, prompt: str) -> str:
     r = requests.post(url, json=payload, headers=headers, timeout=cfg.timeout_s)
     r.raise_for_status()
     data = r.json()
-    return data["choices"][0]["message"]["content"]
+
+    choices = data.get("choices") or []
+    if choices:
+        c0 = choices[0] or {}
+
+        # A) Standard OpenAI: choices[0].message.content is a string
+        msg = c0.get("message") or {}
+        content = msg.get("content")
+
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+
+        # B) Some providers: content is a list of blocks: [{"type":"text","text":"..."}]
+        if isinstance(content, list):
+            texts: list[str] = []
+            for blk in content:
+                if isinstance(blk, dict):
+                    t = blk.get("text")
+                    if isinstance(t, str) and t.strip():
+                        texts.append(t.strip())
+            if texts:
+                return "\n".join(texts).strip()
+
+        # C) Some providers: choices[0].text
+        text = c0.get("text")
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+
+    # D) Some providers: top-level fields
+    for key in ("output_text", "content", "response", "result"):
+        val = data.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+
+    raise RuntimeError(f"Unexpected openai_chat response schema: {str(data)[:800]}")
 
 
 def _call_ollama_chat(cfg: LLMConfig, prompt: str) -> str:
@@ -141,7 +175,10 @@ def _call_ollama_chat(cfg: LLMConfig, prompt: str) -> str:
     r = requests.post(url, json=payload, headers=headers, timeout=cfg.timeout_s)
     r.raise_for_status()
     data = r.json()
-    return (data.get("message") or {}).get("content") or ""
+    content = (data.get("message") or {}).get("content")
+    if isinstance(content, str) and content.strip():
+        return content.strip()
+    return data.get("response", "") or ""
 
 
 def _call_hf_inference(cfg: LLMConfig, prompt: str) -> str:

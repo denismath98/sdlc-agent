@@ -3,17 +3,6 @@ name: Code Agent (Issue -> PR / Iteration)
 on:
   issues:
     types: [opened]
-  pull_request:
-    types: [labeled, synchronize, reopened]
-  workflow_dispatch:
-
-jobs:
-  code-agent:
-name: Code Agent (Issue -> PR / Iteration)
-
-on:
-  issues:
-    types: [opened]
 
   pull_request:
     types: [labeled, synchronize, reopened]

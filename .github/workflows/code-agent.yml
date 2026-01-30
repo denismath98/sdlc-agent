@@ -3,11 +3,12 @@ name: Code Agent (Issue -> PR / Iteration)
 on:
   issues:
     types: [opened]
-
   pull_request:
-    types: [labeled, synchronize, reopened]
+    types: [labeled]
 
-  workflow_dispatch:
+concurrency:
+  group: code-agent-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: true
 
 jobs:
   code-agent:
@@ -15,22 +16,12 @@ jobs:
       github.event_name == 'issues' ||
       (
         github.event_name == 'pull_request' &&
-        (
-          (github.event.action == 'labeled' && github.event.label.name == 'ai:needs-fix') ||
-          (
-            (github.event.action == 'synchronize' || github.event.action == 'reopened') &&
-            contains(toJson(github.event.pull_request.labels), 'ai:needs-fix')
-          )
-        )
+        github.event.action == 'labeled' &&
+        github.event.label.name == 'ai:needs-fix'
       )
 
     runs-on: ubuntu-latest
     timeout-minutes: 10
-
-    # ВАЖНО: без run_id, иначе группа будет каждый раз новая
-    concurrency:
-      group: code-agent-${{ github.event.pull_request.number || github.event.issue.number }}
-      cancel-in-progress: true
 
     permissions:
       contents: write
@@ -38,19 +29,16 @@ jobs:
       issues: write
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           token: ${{ secrets.GH_PAT }}
-          persist-credentials: true
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install project
+      - name: Install
         run: |
           python -m pip install --upgrade pip
           pip install .

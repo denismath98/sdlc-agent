@@ -112,15 +112,19 @@ def checkout_remote_branch(branch: str) -> None:
 
 def maybe_format_with_black() -> None:
     """
-    Format code if black is available. Never fails the agent if black is missing.
+    Format code with black if available.
+    Uses `python -m black` to avoid PATH issues in CI.
+    Never fails the agent run.
     """
     try:
-        subprocess.run(["black", "."], check=True, text=True, capture_output=True)
-    except FileNotFoundError:
-        # black not installed in this environment
-        return
-    except subprocess.CalledProcessError:
-        # don't block agent; formatting failure shouldn't kill the run
+        subprocess.run(
+            ["python", "-m", "black", "."],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+    except Exception:
+        # Formatting must never break the agent
         return
 
 

@@ -1,6 +1,4 @@
-import subprocess
-import sys
-from pathlib import Path
+import pathlib
 
 import pytest
 
@@ -25,23 +23,21 @@ def test_counts(text, expected):
     assert count_chars(text) == chars
 
 
-def run_cli(args):
-    result = subprocess.run(
-        [sys.executable, "-m", "src.wordcount"] + args,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return result.stdout.strip().splitlines()
+def test_cli_text_argument(tmp_path, capsys):
+    from src import wordcount
+
+    test_text = "hello world"
+    wordcount.main(["--text", test_text])
+    captured = capsys.readouterr()
+    assert captured.out == "words=2\\nlines=1\\nchars=11\\n"
 
 
-def test_cli_text():
-    output = run_cli(["--text", " hello world "])
-    assert output == ["words=2", "lines=1", "chars=17"]
+def test_cli_file_argument(tmp_path, capsys):
+    from src import wordcount
 
-
-def test_cli_file(tmp_path: Path):
     file_path = tmp_path / "sample.txt"
-    file_path.write_text("one\n", encoding="utf-8")
-    output = run_cli(["--file", str(file_path)])
-    assert output == ["words=1", "lines=1", "chars=4"]
+    file_path.write_text("a b\\nc", encoding="utf-8")
+    wordcount.main(["--file", str(file_path)])
+    captured = capsys.readouterr()
+    # "a b\\nc" -> words=3, lines=2, chars=5
+    assert captured.out == "words=3\\nlines=2\\nchars=5\\n")

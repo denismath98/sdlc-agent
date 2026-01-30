@@ -1,6 +1,7 @@
 import argparse
 import os
 import re
+import json
 import subprocess
 from datetime import datetime
 from typing import Optional, Tuple
@@ -169,20 +170,24 @@ def build_code_prompt(issue_title: str, issue_body: str, ai_review: str) -> str:
     return f"""
 SYSTEM:
 You are a senior software engineer acting as a GitHub Code Agent.
-You MUST output only an APPLY-SAFE unified diff that can be applied with `git apply`.
 
 DEVELOPER (ABSOLUTE RULES):
-- Output ONLY a unified diff. No explanations. No markdown. No code fences.
-- The FIRST non-empty line MUST start with: diff --git a/
+Return ONLY a valid JSON object with EXACT keys:
+- "patch": string (a unified diff for `git apply`)
+- "notes": string (1-2 short lines)
+
+Rules for JSON:
+- Output MUST be valid JSON (double quotes, no trailing commas).
+- No markdown, no code fences, no extra text before/after JSON.
+
+Rules for patch:
+- patch MUST start with "diff --git a/".
 - Do NOT include lines starting with: "index ", "new file mode", "deleted file mode".
-- For new files: you MUST use exactly:
-  --- /dev/null
-  +++ b/<path>
-  and include @@ hunks.
+- For new files you MUST use exactly: "--- /dev/null" and "+++ b/<path>".
 - NEVER output '--- dev/null' (without slash).
 - Every changed file MUST have at least one @@ hunk.
-- Keep changes minimal and directly related to the Issue / review feedback.
-- If you cannot comply, output an empty string.
+- Inside hunks, every line MUST start with '+', '-', ' ', or '\\'.
+- Keep changes minimal and directly related to Issue / review feedback.
 
 Safety constraints:
 - Forbidden exact files: {DENY_EXACT}
@@ -202,7 +207,7 @@ Issue body:
 Latest AI review feedback (fix these issues if present):
 {ai_review}
 
-Output ONLY the diff:
+OUTPUT (JSON only):
 """.strip()
 
 
@@ -223,6 +228,43 @@ def sanitize_llm_patch(text: str) -> str:
     if t and not t.endswith("\n"):
         t += "\n"
     return t
+
+
+def extract_patch_from_llm(text: str) -> Tuple[str, str]:
+    """
+    Returns (patch, notes). Supports:
+    1) JSON: {"patch": "...", "notes": "..."}
+    2) Fallback: raw unified diff starting from 'diff --git'
+    """
+    raw = (text or "").strip()
+
+    # 1) Try pure JSON
+    if raw.startswith("{"):
+        try:
+            obj = json.loads(raw)
+            patch = (obj.get("patch") or "").strip()
+            notes = (obj.get("notes") or "").strip()
+            return patch, notes
+        except Exception:
+            pass
+
+    # 2) Try to find JSON object inside text (common when model adds extra lines)
+    m = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+    if m:
+        try:
+            obj = json.loads(m.group(0))
+            patch = (obj.get("patch") or "").strip()
+            notes = (obj.get("notes") or "").strip()
+            return patch, notes
+        except Exception:
+            pass
+
+    # 3) Fallback to diff extraction
+    idx = raw.find("diff --git")
+    if idx != -1:
+        return raw[idx:].strip(), ""
+
+    return "", ""
 
 
 def looks_like_unified_diff(t: str) -> bool:
@@ -267,70 +309,46 @@ def diff_touches_forbidden(diff_text: str) -> Optional[str]:
 
 
 def normalize_dev_null(diff_text: str) -> str:
-    """
-    Fix common LLM mistakes around /dev/null.
-    Ensures old-file marker for new files is exactly '--- /dev/null'.
-    """
     diff_text = diff_text.replace("\r\n", "\n")
-
-    # Strictly fix old/new file markers when they appear at line start
-    diff_text = re.sub(r"(?m)^---\s+(a/)?dev/null\s*$", "--- /dev/null", diff_text)
-    diff_text = re.sub(r"(?m)^\+\+\+\s+(b/)?dev/null\s*$", "+++ /dev/null", diff_text)
-
-    # Also fix any accidental '--- dev/null' with trailing spaces
-    diff_text = re.sub(r"(?m)^---\s+dev/null(\s+.*)?$", "--- /dev/null", diff_text)
-
+    diff_text = re.sub(r"(?m)^---\s+(?:a/)?dev/null\s*$", "--- /dev/null", diff_text)
+    diff_text = re.sub(r"(?m)^\+\+\+\s+(?:b/)?dev/null\s*$", "+++ /dev/null", diff_text)
     return diff_text
 
 
 def repair_unified_diff(diff_text: str) -> str:
-    """
-    Repair common LLM mistakes that make `git apply` fail with 'corrupt patch':
-    - Lines inside hunks missing the leading '+', '-', or ' ' prefix.
-    - Blank lines inside hunks should be '+' (added empty line).
-    - Prevent accidental file-header-like lines inside hunks.
-    """
     lines = diff_text.replace("\r\n", "\n").splitlines()
     out: list[str] = []
-
     in_hunk = False
+
     for line in lines:
+        # Always treat these as STRUCTURAL, even if we were in a hunk
         if line.startswith("diff --git "):
             in_hunk = False
-            out.append(line)
+            out.append(line.rstrip())
             continue
-
         if line.startswith(("--- ", "+++ ")):
-            # file headers are not part of hunks
             in_hunk = False
-            out.append(line)
+            out.append(line.rstrip())
             continue
-
         if line.startswith("@@ "):
             in_hunk = True
-            out.append(line)
+            out.append(line.rstrip())
             continue
 
         if not in_hunk:
-            out.append(line)
+            out.append(line.rstrip())
             continue
 
-        # Inside hunk: valid prefixes are + - space or \ (no newline marker)
+        # Inside hunk: valid prefixes
         if line.startswith(("+", "-", " ", "\\")):
-            out.append(line)
-            continue
-
-        # If model accidentally emits file-header-like lines inside a hunk,
-        # force them to be treated as added text.
-        if line.startswith(("--- ", "+++ ", "diff --git ")):
-            out.append("+" + line)
+            out.append(line.rstrip())
             continue
 
         if line.strip() == "":
             out.append("+")
             continue
 
-        out.append("+" + line)
+        out.append(("+" + line).rstrip())
 
     fixed = "\n".join(out)
     if not fixed.endswith("\n"):
@@ -388,23 +406,47 @@ def attempt_llm_patch(
     """
     Returns (applied, mode, message, raw_preview)
     """
-    prompt = build_code_prompt(issue_title, issue_body, ai_review=ai_review)
-    diff_text, llm_mode, raw1 = llm_generate_diff(prompt)
+
+    def json_patch_prompt(core: str) -> str:
+        # Оборачиваем любой core-текст в требование JSON
+        return (
+            core.strip()
+            + "\n\n"
+            + 'OUTPUT (JSON only): {"patch": "...", "notes": "..."}\n'
+            + "Rules:\n"
+            + "- Output MUST be valid JSON only. No extra text.\n"
+            + '- JSON keys must be exactly: "patch", "notes".\n'
+            + '- "patch" MUST be a unified diff starting with: diff --git a/\n'
+            + "- Do NOT include lines starting with: index , new file mode, deleted file mode.\n"
+            + "- For new files use exactly: --- /dev/null and +++ b/<path>\n"
+            + "- Inside hunks, every line must start with '+', '-', ' ', or '\\\\'.\n"
+        )
+
+    def llm_generate_patch(prompt: str) -> Tuple[str, str, str]:
+        """
+        Returns (patch_text, llm_mode, raw_text)
+        patch_text may be empty if parsing/sanity failed
+        """
+        raw, llm_mode = llm_chat(prompt)
+        raw = raw or ""
+
+        patch, _notes = extract_patch_from_llm(raw)  # <- ты добавлял эту функцию
+        patch = sanitize_llm_patch(patch)  # <- у тебя уже есть
+        if not patch or "diff --git" not in patch:
+            return "", llm_mode, raw
+        return patch, llm_mode, raw
+
+    # -------- 1) main attempt --------
+    base_prompt = build_code_prompt(issue_title, issue_body, ai_review=ai_review)
+    prompt = json_patch_prompt(base_prompt)
+
+    diff_text, llm_mode, raw1 = llm_generate_patch(prompt)
     raw_used = raw1
 
+    # -------- 2) retry if empty --------
     if not diff_text:
-        retry_prompt = f"""
-Return ONLY an APPLY-SAFE unified diff for `git apply`.
-
-Rules:
-- First non-empty line MUST start with: diff --git a/
-- No "index ", no "new file mode", no "deleted file mode".
-- For new files you MUST use exactly:
-  --- /dev/null
-  +++ b/<path>
-- NEVER output '--- dev/null' (without slash).
-- Include @@ hunks.
-- No markdown fences.
+        retry_core = f"""
+Return a patch for `git apply` as JSON.
 
 Issue:
 {issue_title}
@@ -412,11 +454,9 @@ Issue:
 
 Review feedback to fix:
 {ai_review}
-
-OUTPUT (diff only):
 """.strip()
 
-        diff_text, llm_mode2, raw2 = llm_generate_diff(retry_prompt)
+        diff_text, llm_mode2, raw2 = llm_generate_patch(json_patch_prompt(retry_core))
         llm_mode = llm_mode2
         raw_used = raw2
 
@@ -428,29 +468,26 @@ OUTPUT (diff only):
             _preview(raw_used),
         )
 
+    # -------- 3) forbid checks --------
     reason = diff_touches_forbidden(diff_text)
     if reason:
         return False, llm_mode, f"patch rejected: {reason}", _preview(raw_used)
 
+    # -------- 4) apply --------
     try:
         apply_unified_diff(diff_text)
         return True, llm_mode, "patch applied", _preview(raw_used)
+
     except Exception as e:
-        repair_prompt = f"""
-Your previous output failed to apply.
+        # -------- 5) repair retry --------
+        repair_core = f"""
+Your previous patch failed to apply.
 
-Return ONLY a NEW APPLY-SAFE unified diff suitable for `git apply`.
-
-Rules:
-- First non-empty line MUST start with: diff --git a/
-- No "index ", no "new file mode", no "deleted file mode".
-- No markdown fences.
-- If a file exists, MODIFY it.
-- If a file is missing, CREATE it using exactly:
-  --- /dev/null
-  +++ b/<path>
-  and @@ hunks.
-- NEVER output '--- dev/null' (without slash).
+Return a NEW patch (JSON) that WILL apply cleanly with `git apply`.
+If a file exists, MODIFY it. If missing, CREATE it using exactly:
+--- /dev/null
++++ b/<path>
+and @@ hunks.
 
 Issue:
 {issue_title}
@@ -458,11 +495,9 @@ Issue:
 
 AI review feedback:
 {ai_review}
-
-OUTPUT (diff only):
 """.strip()
 
-        diff3, llm_mode3, raw3 = llm_generate_diff(repair_prompt)
+        diff3, llm_mode3, raw3 = llm_generate_patch(json_patch_prompt(repair_core))
         if not diff3:
             return (
                 False,
@@ -473,7 +508,12 @@ OUTPUT (diff only):
 
         reason2 = diff_touches_forbidden(diff3)
         if reason2:
-            return False, llm_mode3, f"repair patch rejected: {reason2}", _preview(raw3)
+            return (
+                False,
+                llm_mode3,
+                f"repair patch rejected: {reason2}",
+                _preview(raw3),
+            )
 
         try:
             apply_unified_diff(diff3)

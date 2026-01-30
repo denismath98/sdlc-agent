@@ -399,11 +399,123 @@ def fix_bare_hunk_headers(diff_text: str) -> str:
     return fixed
 
 
+def canonicalize_llm_patch(patch: str) -> str:
+    """
+    Turn 'almost-unified-diff' produced by LLM into a strict unified diff that git can apply.
+    Fixes:
+    - Splits into sections by 'diff --git'
+    - Normalizes /dev/null markers
+    - Fixes bare '@@' headers by converting to '@@ -0,0 +1,N @@'
+    - Ensures all hunk lines are prefixed (+/-/space)
+    - Strips trailing whitespace
+    """
+    txt = (patch or "").replace("\r\n", "\n").strip()
+    if "diff --git" not in txt:
+        return ""
+
+    # Keep only from first diff header
+    txt = txt[txt.find("diff --git") :]
+
+    # Split into file sections
+    parts = re.split(r"(?m)^(?=diff --git )", txt)
+    sections = [p for p in parts if p.strip()]
+
+    out_sections: list[str] = []
+
+    for sec in sections:
+        lines = sec.splitlines()
+        sec_out: list[str] = []
+
+        in_hunk = False
+        pending_bare_hunk = False
+        bare_hunk_added = 0
+
+        for line in lines:
+            line = line.rstrip()
+
+            # Structural lines reset hunk state
+            if line.startswith("diff --git "):
+                in_hunk = False
+                pending_bare_hunk = False
+                sec_out.append(line)
+                continue
+
+            if line.startswith("--- "):
+                in_hunk = False
+                pending_bare_hunk = False
+                # normalize dev/null variants
+                line = re.sub(r"^---\s+(?:a/)?dev/null$", "--- /dev/null", line)
+                sec_out.append(line)
+                continue
+
+            if line.startswith("+++ "):
+                in_hunk = False
+                pending_bare_hunk = False
+                line = re.sub(r"^\+\+\+\s+(?:b/)?dev/null$", "+++ /dev/null", line)
+                sec_out.append(line)
+                continue
+
+            if line.startswith("@@ "):
+                in_hunk = True
+                pending_bare_hunk = False
+                sec_out.append(line)
+                continue
+
+            if line.strip() == "@@":
+                # bare hunk header, we will replace it later once we know N
+                in_hunk = True
+                pending_bare_hunk = True
+                bare_hunk_added = 0
+                sec_out.append("@@ __BARE__ @@")
+                continue
+
+            if not in_hunk:
+                # Allow only known structural metadata or empty lines; keep as-is
+                sec_out.append(line)
+                continue
+
+            # Inside hunk
+            if line.startswith(("diff --git ", "--- ", "+++ ")):
+                # If model accidentally emits structural lines inside hunk, close hunk
+                in_hunk = False
+                pending_bare_hunk = False
+                sec_out.append(line)
+                continue
+
+            if line.startswith(("+", "-", " ", "\\")):
+                sec_out.append(line)
+                if pending_bare_hunk and (line.startswith("+") or line == "+"):
+                    bare_hunk_added += 1
+                continue
+
+            if line == "":
+                sec_out.append("+")
+                if pending_bare_hunk:
+                    bare_hunk_added += 1
+                continue
+
+            # Missing prefix -> treat as added line
+            sec_out.append("+" + line)
+            if pending_bare_hunk:
+                bare_hunk_added += 1
+
+        # Fix placeholder bare hunk header if present
+        fixed_sec: list[str] = []
+        for ln in sec_out:
+            if ln == "@@ __BARE__ @@":
+                n = bare_hunk_added if bare_hunk_added > 0 else 1
+                fixed_sec.append(f"@@ -0,0 +1,{n} @@")
+            else:
+                fixed_sec.append(ln)
+
+        # Ensure ends with newline
+        out_sections.append("\n".join(fixed_sec).rstrip() + "\n")
+
+    return "\n".join(out_sections).rstrip() + "\n"
+
+
 def apply_unified_diff(diff_text: str) -> None:
-    """Apply a unified diff to the working tree. Tries normal apply, then 3-way."""
-    diff_text = normalize_dev_null(diff_text)
-    diff_text = fix_bare_hunk_headers(diff_text)
-    diff_text = repair_unified_diff(diff_text)
+    diff_text = canonicalize_llm_patch(diff_text)
 
     p = subprocess.run(
         ["git", "apply", "--whitespace=fix"],

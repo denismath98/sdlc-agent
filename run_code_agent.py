@@ -1,7 +1,7 @@
 import argparse
+import json
 import os
 import re
-import json
 import subprocess
 from datetime import datetime
 from typing import Optional, Tuple
@@ -153,9 +153,8 @@ def repo_file_tree(max_files: int = 120) -> str:
     """
     files = sh(["git", "ls-files"]).splitlines()
     files = [f for f in files if not f.startswith("build/")]
-    # Prefer likely relevant dirs first
-    preferred = []
-    rest = []
+    preferred: list[str] = []
+    rest: list[str] = []
     for f in files:
         if f.startswith(("src/", "tests/", "agents/")):
             preferred.append(f)
@@ -186,7 +185,7 @@ Rules for patch:
 - For new files you MUST use exactly: "--- /dev/null" and "+++ b/<path>".
 - NEVER output '--- dev/null' (without slash).
 - Every changed file MUST have at least one @@ hunk.
-- Inside hunks, every line MUST start with '+', '-', ' ', or '\\'.
+- Inside hunks, every line MUST start with '+', '-', ' ', or '\\\\'.
 - Keep changes minimal and directly related to Issue / review feedback.
 
 Safety constraints:
@@ -218,16 +217,17 @@ def _preview(text: str, n: int = LLM_PREVIEW_CHARS) -> str:
     return t[:n] + "..."
 
 
-def sanitize_llm_patch(text: str) -> str:
-    t = (text or "").replace("\r\n", "\n").strip()
-    if "```" in t:
-        t = t.replace("```diff", "").replace("```", "").strip()
-    idx = t.find("diff --git")
-    if idx != -1:
-        t = t[idx:]
-    if t and not t.endswith("\n"):
-        t += "\n"
-    return t
+def strip_code_fences_only(text: str) -> str:
+    """
+    Remove surrounding markdown fences if model included them. Do NOT attempt
+    to sanitize diff structure here (it can break /dev/null semantics).
+    """
+    t = (text or "").strip()
+    # strip opening fence
+    t = re.sub(r"^\s*```[a-zA-Z0-9_-]*\s*\n", "", t)
+    # strip closing fence
+    t = re.sub(r"\n\s*```\s*$", "", t)
+    return t.strip()
 
 
 def extract_patch_from_llm(text: str) -> Tuple[str, str]:
@@ -273,7 +273,8 @@ def looks_like_unified_diff(t: str) -> bool:
         return False
     if "\n--- " not in s or "\n+++ " not in s:
         return False
-    if "\n@@ " not in s:
+    # allow bare @@ (we can fix it), but must contain at least one @@ marker
+    if "\n@@" not in s:
         return False
     return True
 
@@ -286,128 +287,32 @@ def _path_is_allowed(path: str) -> bool:
 
 def diff_touches_forbidden(diff_text: str) -> Optional[str]:
     for line in diff_text.splitlines():
-        if (
-            line.startswith("+++ b/")
-            or line.startswith("--- a/")
-            or line.startswith("--- /dev/null")
-        ):
-            if line.startswith("--- /dev/null"):
-                continue
-            if line.startswith("+++ b/"):
-                path = line[6:]
-            else:
-                path = line[6:]
-            if not path or path == "/dev/null":
-                continue
-            if path in DENY_EXACT:
-                return f"attempted to modify forbidden file: {path}"
-            if any(path.startswith(p) for p in DENY_PATH_PREFIXES):
-                return f"attempted to modify forbidden path: {path}"
-            if not _path_is_allowed(path):
-                return f"attempted to modify non-allowed path: {path}"
+        if line.startswith("+++ b/"):
+            path = line[6:]
+        elif line.startswith("--- a/"):
+            path = line[6:]
+        else:
+            continue
+
+        if not path or path == "/dev/null":
+            continue
+        if path in DENY_EXACT:
+            return f"attempted to modify forbidden file: {path}"
+        if any(path.startswith(p) for p in DENY_PATH_PREFIXES):
+            return f"attempted to modify forbidden path: {path}"
+        if not _path_is_allowed(path):
+            return f"attempted to modify non-allowed path: {path}"
     return None
-
-
-def normalize_dev_null(diff_text: str) -> str:
-    diff_text = diff_text.replace("\r\n", "\n")
-    diff_text = re.sub(r"(?m)^---\s+(?:a/)?dev/null\s*$", "--- /dev/null", diff_text)
-    diff_text = re.sub(r"(?m)^\+\+\+\s+(?:b/)?dev/null\s*$", "+++ /dev/null", diff_text)
-    return diff_text
-
-
-def repair_unified_diff(diff_text: str) -> str:
-    lines = diff_text.replace("\r\n", "\n").splitlines()
-    out: list[str] = []
-    in_hunk = False
-
-    for line in lines:
-        # Always treat these as STRUCTURAL, even if we were in a hunk
-        if line.startswith("diff --git "):
-            in_hunk = False
-            out.append(line.rstrip())
-            continue
-        if line.startswith(("--- ", "+++ ")):
-            in_hunk = False
-            out.append(line.rstrip())
-            continue
-        if line.startswith("@@ "):
-            in_hunk = True
-            out.append(line.rstrip())
-            continue
-
-        if not in_hunk:
-            out.append(line.rstrip())
-            continue
-
-        # Inside hunk: valid prefixes
-        if line.startswith(("+", "-", " ", "\\")):
-            out.append(line.rstrip())
-            continue
-
-        if line.strip() == "":
-            out.append("+")
-            continue
-
-        out.append(("+" + line).rstrip())
-
-    fixed = "\n".join(out)
-    if not fixed.endswith("\n"):
-        fixed += "\n"
-    return fixed
-
-
-def fix_bare_hunk_headers(diff_text: str) -> str:
-    """
-    Some models output invalid hunk headers like '@@' without ranges.
-    This function upgrades bare hunks to a valid form for new-file patches:
-      @@ -0,0 +1,N @@
-    where N is the count of added lines until the next structural marker.
-    """
-    lines = diff_text.replace("\r\n", "\n").splitlines()
-    out: list[str] = []
-
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-
-        if line.strip() == "@@":
-            # Count added lines until next structural marker
-            j = i + 1
-            added = 0
-            while j < len(lines):
-                nxt = lines[j]
-                if nxt.startswith(("diff --git ", "--- ", "+++ ", "@@ ")):
-                    break
-                if nxt.startswith("+") or nxt == "+":
-                    added += 1
-                j += 1
-
-            # Fallback if somehow zero
-            if added <= 0:
-                added = 1
-
-            out.append(f"@@ -0,0 +1,{added} @@")
-            i += 1
-            continue
-
-        out.append(line)
-        i += 1
-
-    fixed = "\n".join(out)
-    if not fixed.endswith("\n"):
-        fixed += "\n"
-    return fixed
 
 
 def canonicalize_llm_patch(patch: str) -> str:
     """
-    Turn 'almost-unified-diff' produced by LLM into a strict unified diff that git can apply.
-    Fixes:
-    - Splits into sections by 'diff --git'
-    - Normalizes /dev/null markers
-    - Fixes bare '@@' headers by converting to '@@ -0,0 +1,N @@'
-    - Ensures all hunk lines are prefixed (+/-/space)
-    - Strips trailing whitespace
+    Make a strict unified diff safe for `git apply` from imperfect LLM output.
+    Key fixes:
+    - Split by 'diff --git' so sections can't bleed into each other.
+    - Normalize /dev/null markers.
+    - Fix bare '@@' by converting to '@@ -0,0 +1,N @@' (N counted from added lines).
+    - Ensure all hunk lines are prefixed (+/-/space/\\). Missing prefix => '+'
     """
     txt = (patch or "").replace("\r\n", "\n").strip()
     if "diff --git" not in txt:
@@ -433,7 +338,6 @@ def canonicalize_llm_patch(patch: str) -> str:
         for line in lines:
             line = line.rstrip()
 
-            # Structural lines reset hunk state
             if line.startswith("diff --git "):
                 in_hunk = False
                 pending_bare_hunk = False
@@ -443,15 +347,14 @@ def canonicalize_llm_patch(patch: str) -> str:
             if line.startswith("--- "):
                 in_hunk = False
                 pending_bare_hunk = False
-                # normalize dev/null variants
-                line = re.sub(r"^---\s+(?:a/)?dev/null$", "--- /dev/null", line)
+                line = re.sub(r"^---\s+(?:a/)?dev/null\s*$", "--- /dev/null", line)
                 sec_out.append(line)
                 continue
 
             if line.startswith("+++ "):
                 in_hunk = False
                 pending_bare_hunk = False
-                line = re.sub(r"^\+\+\+\s+(?:b/)?dev/null$", "+++ /dev/null", line)
+                line = re.sub(r"^\+\+\+\s+(?:b/)?dev/null\s*$", "+++ /dev/null", line)
                 sec_out.append(line)
                 continue
 
@@ -462,7 +365,6 @@ def canonicalize_llm_patch(patch: str) -> str:
                 continue
 
             if line.strip() == "@@":
-                # bare hunk header, we will replace it later once we know N
                 in_hunk = True
                 pending_bare_hunk = True
                 bare_hunk_added = 0
@@ -470,13 +372,11 @@ def canonicalize_llm_patch(patch: str) -> str:
                 continue
 
             if not in_hunk:
-                # Allow only known structural metadata or empty lines; keep as-is
                 sec_out.append(line)
                 continue
 
             # Inside hunk
             if line.startswith(("diff --git ", "--- ", "+++ ")):
-                # If model accidentally emits structural lines inside hunk, close hunk
                 in_hunk = False
                 pending_bare_hunk = False
                 sec_out.append(line)
@@ -494,12 +394,10 @@ def canonicalize_llm_patch(patch: str) -> str:
                     bare_hunk_added += 1
                 continue
 
-            # Missing prefix -> treat as added line
             sec_out.append("+" + line)
             if pending_bare_hunk:
                 bare_hunk_added += 1
 
-        # Fix placeholder bare hunk header if present
         fixed_sec: list[str] = []
         for ln in sec_out:
             if ln == "@@ __BARE__ @@":
@@ -508,13 +406,19 @@ def canonicalize_llm_patch(patch: str) -> str:
             else:
                 fixed_sec.append(ln)
 
-        # Ensure ends with newline
         out_sections.append("\n".join(fixed_sec).rstrip() + "\n")
 
     return "\n".join(out_sections).rstrip() + "\n"
 
 
 def apply_unified_diff(diff_text: str) -> None:
+    """
+    Apply LLM diff to working tree. Always canonicalizes first to avoid common failures:
+    - bare @@ headers
+    - missing '+' prefixes
+    - /dev/null normalization
+    """
+    diff_text = strip_code_fences_only(diff_text)
     diff_text = canonicalize_llm_patch(diff_text)
 
     p = subprocess.run(
@@ -542,20 +446,6 @@ def apply_unified_diff(diff_text: str) -> None:
     )
 
 
-def llm_generate_diff(prompt: str) -> Tuple[str, str, str]:
-    raw, mode = llm_chat(prompt)
-    raw = raw or ""
-    cleaned = sanitize_llm_patch(raw)
-
-    if not cleaned.strip():
-        return "", mode, raw
-    if not looks_like_unified_diff(cleaned):
-        return "", mode, raw
-
-    cleaned = cleaned[:MAX_DIFF_CHARS]
-    return cleaned, mode, raw
-
-
 def attempt_llm_patch(
     issue_title: str, issue_body: str, ai_review: str
 ) -> Tuple[bool, str, str, str]:
@@ -563,58 +453,50 @@ def attempt_llm_patch(
     Returns (applied, mode, message, raw_preview)
     """
 
-    def json_patch_prompt(core: str) -> str:
-        # Оборачиваем любой core-текст в требование JSON
-        return (
-            core.strip()
-            + "\n\n"
-            + 'OUTPUT (JSON only): {"patch": "...", "notes": "..."}\n'
-            + "Rules:\n"
-            + "- Output MUST be valid JSON only. No extra text.\n"
-            + '- JSON keys must be exactly: "patch", "notes".\n'
-            + '- "patch" MUST be a unified diff starting with: diff --git a/\n'
-            + "- Do NOT include lines starting with: index , new file mode, deleted file mode.\n"
-            + "- For new files use exactly: --- /dev/null and +++ b/<path>\n"
-            + "- Inside hunks, every line must start with '+', '-', ' ', or '\\\\'.\n"
-        )
-
     def llm_generate_patch(prompt: str) -> Tuple[str, str, str]:
-        """
-        Returns (patch_text, llm_mode, raw_text)
-        patch_text may be empty if parsing/sanity failed
-        """
         raw, llm_mode = llm_chat(prompt)
         raw = raw or ""
 
-        patch, _notes = extract_patch_from_llm(raw)  # <- ты добавлял эту функцию
-        patch = sanitize_llm_patch(patch)  # <- у тебя уже есть
+        patch, _notes = extract_patch_from_llm(raw)
+        patch = strip_code_fences_only(patch)
+
         if not patch or "diff --git" not in patch:
             return "", llm_mode, raw
+        if not looks_like_unified_diff(patch):
+            # still allow canonicalizer to fix bare @@ and missing prefixes,
+            # but we need at least the diff skeleton
+            return "", llm_mode, raw
+
+        patch = patch[:MAX_DIFF_CHARS]
         return patch, llm_mode, raw
 
-    # -------- 1) main attempt --------
-    base_prompt = build_code_prompt(issue_title, issue_body, ai_review=ai_review)
-    prompt = json_patch_prompt(base_prompt)
+    # 1) main attempt
+    prompt = build_code_prompt(issue_title, issue_body, ai_review=ai_review)
+    diff_text, llm_mode, raw_used = llm_generate_patch(prompt)
 
-    diff_text, llm_mode, raw1 = llm_generate_patch(prompt)
-    raw_used = raw1
-
-    # -------- 2) retry if empty --------
+    # 2) retry if empty
     if not diff_text:
-        retry_core = f"""
-Return a patch for `git apply` as JSON.
+        retry_prompt = f"""
+SYSTEM:
+Return ONLY JSON with keys "patch" and "notes".
+
+Rules:
+- JSON only, no extra text.
+- "patch" MUST be unified diff starting with 'diff --git a/'.
+- For new files use exactly: '--- /dev/null' and '+++ b/<path>'.
+- Every file must have at least one @@ hunk.
+- Inside hunks, every line starts with '+', '-', ' ', or '\\\\'.
 
 Issue:
 {issue_title}
 {issue_body}
 
-Review feedback to fix:
+Review feedback:
 {ai_review}
-""".strip()
 
-        diff_text, llm_mode2, raw2 = llm_generate_patch(json_patch_prompt(retry_core))
-        llm_mode = llm_mode2
-        raw_used = raw2
+OUTPUT (JSON only):
+""".strip()
+        diff_text, llm_mode, raw_used = llm_generate_patch(retry_prompt)
 
     if not diff_text:
         return (
@@ -624,26 +506,29 @@ Review feedback to fix:
             _preview(raw_used),
         )
 
-    # -------- 3) forbid checks --------
     reason = diff_touches_forbidden(diff_text)
     if reason:
         return False, llm_mode, f"patch rejected: {reason}", _preview(raw_used)
 
-    # -------- 4) apply --------
     try:
         apply_unified_diff(diff_text)
         return True, llm_mode, "patch applied", _preview(raw_used)
 
     except Exception as e:
-        # -------- 5) repair retry --------
-        repair_core = f"""
-Your previous patch failed to apply.
+        # 3) repair retry
+        repair_prompt = f"""
+SYSTEM:
+Your previous patch failed to apply. Return a NEW patch.
 
-Return a NEW patch (JSON) that WILL apply cleanly with `git apply`.
-If a file exists, MODIFY it. If missing, CREATE it using exactly:
---- /dev/null
-+++ b/<path>
-and @@ hunks.
+Return ONLY JSON with keys "patch" and "notes".
+
+Rules:
+- JSON only, no extra text.
+- "patch" MUST be unified diff starting with 'diff --git a/'.
+- Do NOT include 'index ', 'new file mode', 'deleted file mode'.
+- For new files use exactly: '--- /dev/null' and '+++ b/<path>'.
+- Every file must have at least one @@ hunk with ranges.
+- Inside hunks, every line starts with '+', '-', ' ', or '\\\\'.
 
 Issue:
 {issue_title}
@@ -651,9 +536,11 @@ Issue:
 
 AI review feedback:
 {ai_review}
+
+OUTPUT (JSON only):
 """.strip()
 
-        diff3, llm_mode3, raw3 = llm_generate_patch(json_patch_prompt(repair_core))
+        diff3, llm_mode3, raw3 = llm_generate_patch(repair_prompt)
         if not diff3:
             return (
                 False,
@@ -710,7 +597,7 @@ def handle_issue_mode(gh_repo, issue_number: int) -> None:
         f"LLM preview (first {LLM_PREVIEW_CHARS} chars):\n{raw_preview}"
     )
 
-    committed = commit_change(f"Implement Issue #{issue_number}")
+    commit_change(f"Implement Issue #{issue_number}")
     push_branch(branch)
 
     head = f"{owner}:{branch}"

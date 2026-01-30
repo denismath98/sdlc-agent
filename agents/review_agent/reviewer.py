@@ -39,7 +39,9 @@ def ensure_label(repo, name: str, color: str) -> None:
     try:
         repo.get_label(name)
     except Exception:
-        repo.create_label(name=name, color=color, description="Auto label by AI reviewer")
+        repo.create_label(
+            name=name, color=color, description="Auto label by AI reviewer"
+        )
 
 
 def extract_issue_number(pr_body: str) -> Optional[int]:
@@ -75,7 +77,9 @@ def collect_pr_diff(pr, max_chars: int = 8000) -> str:
         parts.append(f.patch if f.patch else "[no patch available]")
         parts.append("")
     text = "\n".join(parts)
-    return text if len(text) <= max_chars else (text[:max_chars] + "\n...[TRUNCATED]...")
+    return (
+        text if len(text) <= max_chars else (text[:max_chars] + "\n...[TRUNCATED]...")
+    )
 
 
 def clamp(text: str, max_len: int) -> str:
@@ -94,7 +98,9 @@ def parse_llm_status(llm_out: str) -> Optional[str]:
 
 def format_ai_review(res: ReviewResult, pr_number: int) -> str:
     issues_block = "\n".join([f"- {x}" for x in res.issues]) if res.issues else "- None"
-    sugg_block = "\n".join([f"- {x}" for x in res.suggestions]) if res.suggestions else "- None"
+    sugg_block = (
+        "\n".join([f"- {x}" for x in res.suggestions]) if res.suggestions else "- None"
+    )
     return (
         "AI-REVIEW:\n"
         f"status={res.status}\n"

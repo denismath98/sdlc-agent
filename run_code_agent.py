@@ -246,7 +246,9 @@ def apply_unified_diff(diff_text: str) -> None:
 
     err1 = (p.stderr or "").strip()
     err2 = (p2.stderr or "").strip()
-    raise RuntimeError(("git apply failed:\n" + err1 + "\n---\n3way failed:\n" + err2).strip())
+    raise RuntimeError(
+        ("git apply failed:\n" + err1 + "\n---\n3way failed:\n" + err2).strip()
+    )
 
 
 def attempt_llm_patch(
@@ -305,7 +307,11 @@ def attempt_llm_patch(
                     apply_unified_diff(diff3)
                     return True, llm_mode3, "patch applied (repair retry)"
                 except Exception as e2:
-                    return False, llm_mode3, f"failed to apply patch after repair retry: {e2}"
+                    return (
+                        False,
+                        llm_mode3,
+                        f"failed to apply patch after repair retry: {e2}",
+                    )
 
         return False, llm_mode, f"failed to apply patch: {e}"
 

@@ -1,44 +1,51 @@
-import pathlib
+import os
+import tempfile
 
 import pytest
 
-from src.wordcount import count_chars, count_lines, count_words
+from src.wordcount import count_words, count_lines, count_chars, main
 
 
 @pytest.mark.parametrize(
-    "text,expected_words,expected_lines,expected_chars",
+    "text,expected",
     [
-        ("", 0, 0, 0),
-        ("  hello   world  ", 2, 1, 17),
-        ("line1\nline2\n", 2, 2, 12),
-        ("one\n", 1, 1, 4),
-        ("one", 1, 1, 3),
-        ("\n\n", 0, 2, 2),
+        ("", (0, 0, 0)),
+        ("  hello   world  ", (2, 1, 17)),
+        ("line1\nline2\n", (2, 2, 12)),
+        ("one\n", (1, 1, 4)),
+        ("one", (1, 1, 3)),
+        ("\n\n", (0, 2, 2)),
     ],
 )
-def test_counts(text, expected_words, expected_lines, expected_chars):
-    assert count_words(text) == expected_words
-    assert count_lines(text) == expected_lines
-    assert count_chars(text) == expected_chars
+def test_counts(text, expected):
+    words, lines, chars = expected
+    assert count_words(text) == words
+    assert count_lines(text) == lines
+    assert count_chars(text) == chars
 
 
-def test_cli_text_argument(tmp_path, monkeypatch, capsys):
-    from src import wordcount
-
-    test_text = "hello world"
-    monkeypatch.setattr("sys.argv", ["prog", "--text", test_text])
-    wordcount.main()
-    captured = capsys.readouterr().out.strip().splitlines()
-    assert captured == ["words=2", "lines=1", "chars=11"]
+def test_cli_text_argument(capsys):
+    main(["--text", "hello world"])
+    captured = capsys.readouterr()
+    assert captured.out.strip() == "words=2\nlines=1\nchars=11"
 
 
-def test_cli_file_argument(tmp_path, monkeypatch, capsys):
-    from src import wordcount
+def test_cli_file_argument():
+    with tempfile.NamedTemporaryFile(delete=False, mode="w", encoding="utf-8") as tmp:
+        tmp.write("a b\nc")
+        tmp_path = tmp.name
+    try:
+        # Capture stdout
+        from io import StringIO
+        import sys
 
-    file_content = "a b\nc"
-    file_path = tmp_path / "sample.txt"
-    file_path.write_text(file_content, encoding="utf-8")
-    monkeypatch.setattr("sys.argv", ["prog", "--file", str(file_path)])
-    wordcount.main()
-    captured = capsys.readouterr().out.strip().splitlines()
-    assert captured == ["words=3", "lines=2", "chars=6"]
+        old_stdout = sys.stdout
+        sys.stdout = StringIO()
+        try:
+            main(["--file", tmp_path])
+            output = sys.stdout.getvalue().strip()
+        finally:
+            sys.stdout = old_stdout
+        assert output == "words=3\nlines=2\nchars=6"
+    finally:
+        os.remove(tmp_path)

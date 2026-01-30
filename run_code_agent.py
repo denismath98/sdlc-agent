@@ -12,7 +12,7 @@ from agents.llm_client import llm_chat
 MAX_ITERATIONS = 3
 AI_DIR = ".ai"
 
-# Safety rails: prevent the agent from changing dangerous files/paths.
+# Safety rails: do not allow the agent to change dangerous files/paths.
 ALLOWED_PATH_PREFIXES = ("agents/", "tests/", "src/", ".ai/")
 ALLOWED_EXACT = ("README.md",)
 DENY_PATH_PREFIXES = (".github/workflows/",)
@@ -21,7 +21,6 @@ MAX_DIFF_CHARS = 12000
 
 
 def sh(cmd: list[str]) -> str:
-    """Run command and return stdout. Raises on non-zero exit."""
     res = subprocess.run(cmd, check=True, text=True, capture_output=True)
     return res.stdout.strip()
 
@@ -37,13 +36,31 @@ def ensure_git_identity() -> None:
     sh(["git", "config", "user.email", "code-agent[bot]@users.noreply.github.com"])
 
 
-def commit_change(message: str) -> None:
+def maybe_format_with_black() -> str:
+    """Best-effort format. Never fails the agent run."""
+    try:
+        subprocess.run(
+            ["python", "-m", "black", "."],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        return "black: formatted"
+    except Exception as e:
+        return f"black: skipped ({e})"
+
+
+def commit_change(message: str) -> bool:
+    """Returns True if commit created, False if nothing to commit."""
     sh(["git", "add", "-A"])
+    status = sh(["git", "status", "--porcelain"])
+    if not status.strip():
+        return False
     sh(["git", "commit", "-m", message])
+    return True
 
 
 def push_branch(branch: str) -> None:
-    # No force push: some repos/rulesets disallow it.
     sh(["git", "push", "-u", "origin", branch])
 
 
@@ -62,7 +79,6 @@ def get_token() -> str:
 
 
 def gh_client() -> Github:
-    # New-style auth API (no deprecation warnings)
     return Github(auth=Auth.Token(get_token()))
 
 
@@ -110,24 +126,6 @@ def checkout_remote_branch(branch: str) -> None:
     sh(["git", "checkout", "-B", branch, f"origin/{branch}"])
 
 
-def maybe_format_with_black() -> None:
-    """
-    Format code with black if available.
-    Uses `python -m black` to avoid PATH issues in CI.
-    Never fails the agent run.
-    """
-    try:
-        subprocess.run(
-            ["python", "-m", "black", "."],
-            check=True,
-            text=True,
-            capture_output=True,
-        )
-    except Exception:
-        # Formatting must never break the agent
-        return
-
-
 def write_ai_issue_file(issue_number: int, title: str, body: str) -> str:
     os.makedirs(AI_DIR, exist_ok=True)
     out_path = os.path.join(AI_DIR, f"issue-{issue_number}.md")
@@ -143,35 +141,6 @@ def write_ai_issue_file(issue_number: int, title: str, body: str) -> str:
     return out_path
 
 
-def apply_iteration_fix(
-    issue_number: Optional[int], iteration: int, ai_review: str
-) -> str:
-    """
-    Deterministic fallback (always safe):
-    - ensure .ai/issue-<n>.md exists (or .ai/issue-unknown.md)
-    - append an iteration note and whether AI-REVIEW was detected
-    """
-    os.makedirs(AI_DIR, exist_ok=True)
-    if issue_number:
-        out_path = os.path.join(AI_DIR, f"issue-{issue_number}.md")
-    else:
-        out_path = os.path.join(AI_DIR, "issue-unknown.md")
-
-    if not os.path.exists(out_path):
-        with open(out_path, "w", encoding="utf-8") as f:
-            f.write("# Auto-generated placeholder\n")
-
-    with open(out_path, "a", encoding="utf-8") as f:
-        f.write("\n\n## Auto-fix iteration\n")
-        f.write(f"- iteration: {iteration}\n")
-        f.write(f"- ai_review_detected: {'yes' if ai_review else 'no'}\n")
-
-    return out_path
-
-
-# -------------------- LLM patch generation helpers --------------------
-
-
 def repo_file_tree(max_files: int = 250) -> str:
     files = sh(["git", "ls-files"]).splitlines()
     files = [f for f in files if not f.startswith("build/")]
@@ -182,11 +151,10 @@ def build_code_prompt(issue_title: str, issue_body: str, ai_review: str) -> str:
     tree = repo_file_tree()
     return f"""
 SYSTEM:
-You are a code-writing agent. You MUST output only a valid unified diff.
+You are a coding agent working inside a Git repository.
 
-DEVELOPER:
-Output format rules (MANDATORY):
-- Output ONLY a unified diff suitable for `git apply`.
+DEVELOPER (MANDATORY OUTPUT FORMAT):
+- Output ONLY a valid unified diff suitable for `git apply`.
 - The FIRST non-empty line MUST start with: diff --git a/
 - Do NOT output any other text, explanation, markdown, or code fences.
 - If you cannot produce a valid diff, output an empty string.
@@ -197,18 +165,20 @@ Safety constraints:
 - Allowed path prefixes: {ALLOWED_PATH_PREFIXES}
 - Allowed exact files: {ALLOWED_EXACT}
 
-Repository files (partial):
+Repository file list (partial):
 {tree}
 
-ISSUE TITLE:
+Issue title:
 {issue_title}
 
-ISSUE BODY:
+Issue body:
 {issue_body}
 
-LATEST AI REVIEW (may be empty):
+Latest AI review feedback (if any):
 {ai_review}
 
+Task:
+Implement the Issue requirements. If AI review points out mismatches or missing work, fix them.
 Remember: output ONLY unified diff starting with 'diff --git'.
 """.strip()
 
@@ -216,7 +186,7 @@ Remember: output ONLY unified diff starting with 'diff --git'.
 def extract_unified_diff(text: str) -> str:
     t = (text or "").strip()
     idx = t.find("diff --git")
-    return "" if idx == -1 else t[idx:]
+    return "" if idx == -1 else (t[idx:] + "\n")
 
 
 def _path_is_allowed(path: str) -> bool:
@@ -226,16 +196,11 @@ def _path_is_allowed(path: str) -> bool:
 
 
 def diff_touches_forbidden(diff_text: str) -> Optional[str]:
-    """
-    Return a reason if forbidden, else None.
-    Simplistic parsing based on '+++ b/...' / '--- a/...'.
-    """
     for line in diff_text.splitlines():
         if line.startswith("+++ b/") or line.startswith("--- a/"):
             path = line[6:]
             if not path or path == "/dev/null":
                 continue
-
             if path in DENY_EXACT:
                 return f"attempted to modify forbidden file: {path}"
             if any(path.startswith(p) for p in DENY_PATH_PREFIXES):
@@ -253,61 +218,24 @@ def apply_unified_diff(diff_text: str) -> None:
         capture_output=True,
     )
     if p.returncode != 0:
-        raise RuntimeError(f"git apply failed:\n{p.stderr}")
-
-
-def deterministic_task_fallback(issue_title: str, issue_body: str) -> Optional[str]:
-    """
-    A tiny deterministic safety net for the demo task:
-    - If the Issue asks for src/utils.py add() and tests/test_utils.py, create them.
-    This prevents "endless needs-fix" when the LLM fails to output a diff.
-    """
-    text = (issue_title + "\n" + issue_body).lower()
-    if "src/utils.py" in text and "tests/test_utils.py" in text and "add(" in text:
-        os.makedirs("src", exist_ok=True)
-        os.makedirs("tests", exist_ok=True)
-
-        with open("src/__init__.py", "w", encoding="utf-8") as f:
-            f.write("")
-
-        with open("src/utils.py", "w", encoding="utf-8") as f:
-            f.write(
-                "def add(a: int, b: int) -> int:\n"
-                '    """Return the sum of two integers."""\n'
-                "    return a + b\n"
-            )
-
-        with open("tests/test_utils.py", "w", encoding="utf-8") as f:
-            f.write(
-                "from src.utils import add\n\n"
-                "def test_add():\n"
-                "    assert add(2, 3) == 5\n"
-            )
-
-        return "Created src/__init__.py, src/utils.py, tests/test_utils.py"
-
-    return None
+        raise RuntimeError(p.stderr.strip() or "git apply failed")
 
 
 def attempt_llm_patch(
     issue_title: str, issue_body: str, ai_review: str
 ) -> Tuple[bool, str, str]:
-    """
-    Returns: (applied, mode, message)
-    Never raises for LLM issues. Validates diff with git apply.
-    """
     prompt = build_code_prompt(issue_title, issue_body, ai_review=ai_review)
     llm_out, llm_mode = llm_chat(prompt)
     diff_text = extract_unified_diff(llm_out)
 
-    # Retry once with a shorter, even stricter instruction
+    # Retry once with extra-strict short prompt (helps with "corrupt patch")
     if not diff_text:
         retry_prompt = (
-            "Return ONLY a valid unified diff suitable for `git apply`.\n"
-            "First line must start with: diff --git a/\n"
+            "Output ONLY unified diff for `git apply`.\n"
+            "First non-empty line MUST start with: diff --git a/\n"
             "No other text.\n\n"
-            f"ISSUE:\n{issue_title}\n{issue_body}\n\n"
-            f"REVIEW:\n{ai_review}\n"
+            f"Issue:\n{issue_title}\n{issue_body}\n\n"
+            f"AI review:\n{ai_review}\n"
         )
         llm_out2, llm_mode2 = llm_chat(retry_prompt)
         diff_text = extract_unified_diff(llm_out2)
@@ -328,9 +256,6 @@ def attempt_llm_patch(
         return False, llm_mode, f"failed to apply patch: {e}"
 
 
-# -------------------- Main flows --------------------
-
-
 def handle_issue_mode(gh_repo, issue_number: int) -> None:
     issue = gh_repo.get_issue(number=issue_number)
     title = issue.title or f"Issue {issue_number}"
@@ -345,17 +270,19 @@ def handle_issue_mode(gh_repo, issue_number: int) -> None:
     checkout_default_branch(base_branch)
     sh(["git", "checkout", "-B", branch])
 
+    # Always create issue snapshot for traceability
     created_path = write_ai_issue_file(issue_number, title, body)
 
     applied, llm_mode, msg = attempt_llm_patch(title, body, ai_review="")
-    issue.create_comment(f"Code Agent: LLM mode={llm_mode}; {msg}.")
+    fmt_msg = maybe_format_with_black()
 
-    status = sh(["git", "status", "--porcelain"])
-    if status:
-        maybe_format_with_black()
-        commit_change(f"Implement Issue #{issue_number}")
+    issue.create_comment(f"Code Agent: LLM mode={llm_mode}; {msg}. {fmt_msg}")
+
+    committed = commit_change(f"Implement Issue #{issue_number}")
+    if committed:
         push_branch(branch)
     else:
+        # Still push branch, because .ai snapshot may already exist and PR may rely on branch existing
         push_branch(branch)
 
     head = f"{owner}:{branch}"
@@ -365,8 +292,9 @@ def handle_issue_mode(gh_repo, issue_number: int) -> None:
     pr_body = (
         f"Closes #{issue_number}\n\n"
         "AI-ITERATION: 1\n\n"
-        f"Auto-generated initial scaffold. Created `{created_path}`.\n"
-        f"LLM mode: {llm_mode}; LLM result: {msg}\n"
+        f"Created `{created_path}`.\n"
+        f"LLM mode: {llm_mode}; result: {msg}\n"
+        f"{fmt_msg}\n"
     )
 
     if existing:
@@ -388,8 +316,8 @@ def handle_issue_mode(gh_repo, issue_number: int) -> None:
 
 def handle_pr_iteration_mode(gh_repo, pr_number: int) -> None:
     pr = gh_repo.get_pull(pr_number)
-
     current_iter = parse_iteration(pr.body or "")
+
     if current_iter >= MAX_ITERATIONS:
         pr.create_issue_comment(
             f"Code Agent: reached iteration limit ({MAX_ITERATIONS}). Stopping."
@@ -397,7 +325,6 @@ def handle_pr_iteration_mode(gh_repo, pr_number: int) -> None:
         print("STOP: iteration limit reached")
         return
 
-    next_iter = current_iter + 1
     issue_number = extract_issue_number_from_pr(pr.body or "")
     ai_review = extract_latest_ai_review(pr)
 
@@ -415,40 +342,34 @@ def handle_pr_iteration_mode(gh_repo, pr_number: int) -> None:
     applied, llm_mode, msg = attempt_llm_patch(
         issue_title, issue_body, ai_review=ai_review
     )
+    fmt_msg = maybe_format_with_black()
 
-    touched = ""
-    if applied:
-        touched = "LLM patch applied"
+    if not applied:
+        # Important: don't burn an iteration if we didn't manage to change anything.
         pr.create_issue_comment(
-            f"Code Agent: applied LLM patch (mode={llm_mode}) for iteration {next_iter}."
+            f"Code Agent: LLM patch not applied (mode={llm_mode}): {msg}. {fmt_msg} "
+            "No changes committed; iteration not bumped."
         )
-    else:
-        # Try deterministic demo fallback before .ai-only fallback
-        fb = deterministic_task_fallback(issue_title, issue_body)
-        if fb:
-            touched = fb
-            pr.create_issue_comment(
-                f"Code Agent: LLM patch not applied (mode={llm_mode}): {msg}. "
-                f"Applied deterministic task fallback."
-            )
-        else:
-            pr.create_issue_comment(
-                f"Code Agent: LLM patch not applied (mode={llm_mode}): {msg}. Falling back to safe .ai note."
-            )
-            touched = apply_iteration_fix(
-                issue_number=issue_number, iteration=next_iter, ai_review=ai_review
-            )
+        print(f"OK: no patch applied for PR #{pr_number}")
+        return
 
-    status = sh(["git", "status", "--porcelain"])
-    if status:
-        maybe_format_with_black()
-        commit_change(f"Fix based on AI review (iteration {next_iter})")
-        push_branch(branch)
+    committed = commit_change(f"Fix based on AI review (iteration {current_iter + 1})")
+    if not committed:
+        pr.create_issue_comment(
+            f"Code Agent: patch applied but resulted in no net changes. {fmt_msg} "
+            "Iteration not bumped."
+        )
+        print(f"OK: no net changes for PR #{pr_number}")
+        return
 
+    push_branch(branch)
+
+    next_iter = current_iter + 1
     pr.edit(body=bump_iteration(pr.body or "", next_iter))
     pr.create_issue_comment(
-        f"Code Agent: iteration {next_iter} pushed updates. Touched `{touched}`."
+        f"Code Agent: iteration {next_iter} pushed updates. LLM mode={llm_mode}; {msg}. {fmt_msg}"
     )
+
     print(f"OK: updated PR #{pr_number} iteration {next_iter}")
 
 
@@ -466,9 +387,7 @@ def main() -> None:
         handle_issue_mode(gh_repo, args.issue)
         return
 
-    if args.pr is not None:
-        handle_pr_iteration_mode(gh_repo, args.pr)
-        return
+    handle_pr_iteration_mode(gh_repo, args.pr)
 
 
 if __name__ == "__main__":

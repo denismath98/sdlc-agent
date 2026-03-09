@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import Tuple, List
+from typing import List, Tuple
 
 from .models import Task, validate_task_dict
 
@@ -23,14 +23,15 @@ def load_tasks(path: str) -> Tuple[List[Task], List[str]]:
 
     for idx, item in enumerate(raw_data):
         if not isinstance(item, dict):
-            errors.append(f"item {idx}: invalid task format")
+            errors.append(f"item {idx}: invalid format")
             continue
 
-        validation_errors = validate_task_dict(item)
-        if validation_errors:
-            errors.append(f"item {idx}: {', '.join(validation_errors)}")
-        else:
-            tasks.append(Task(**item))
+        item_errors = validate_task_dict(item)
+        if item_errors:
+            errors.append(f"item {idx}: " + "; ".join(item_errors))
+            continue
+
+        tasks.append(Task(**item))
 
     return tasks, errors
 

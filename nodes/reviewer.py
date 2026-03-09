@@ -98,6 +98,28 @@ def format_ai_review(res: ReviewResult, pr_number: int) -> str:
     )
 
 
+def ci_state_from_workflow_env() -> Optional[str]:
+    """
+    Map workflow_run conclusion to reviewer-compatible CI state.
+    Used to avoid reading combined status while reviewer itself is running.
+    """
+    conclusion = (os.getenv("CI_WORKFLOW_CONCLUSION") or "").strip().lower()
+
+    if not conclusion:
+        return None
+
+    if conclusion == "success":
+        return "success"
+
+    if conclusion in ("failure", "timed_out", "cancelled", "startup_failure", "action_required"):
+        return "failure"
+
+    if conclusion in ("neutral", "skipped"):
+        return "error"
+
+    return None
+
+
 def write_job_summary(res: ReviewResult) -> None:
     path = os.environ.get("GITHUB_STEP_SUMMARY")
     if not path:
@@ -137,7 +159,10 @@ def evaluate(repo, pr) -> ReviewResult:
             issues.append(f"Issue #{issue_no} not found or not accessible.")
             suggestions.append("Ensure PR references an existing Issue.")
 
-    ci_state = ci_state_for_pr(repo, pr)
+    ci_state = ci_state_from_workflow_env() or ci_state_for_pr(repo, pr)
+    ci_workflow_name = (os.getenv("CI_WORKFLOW_NAME") or "").strip()
+    if ci_workflow_name:
+        suggestions.append(f"CI workflow source: {ci_workflow_name}")
 
     pytest_exit = (os.getenv("PYTEST_EXIT_CODE") or "").strip()
     black_exit = (os.getenv("BLACK_EXIT_CODE") or "").strip()

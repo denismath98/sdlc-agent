@@ -9,7 +9,8 @@ jobs:
   review:
     if: >
       github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'pull_request'
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.pull_requests[0].number != null
 
     runs-on: ubuntu-latest
 
@@ -38,5 +39,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           LLM_CONFIG_JSON: ${{ secrets.LLM_CONFIG_JSON }}
+          CI_WORKFLOW_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          CI_WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
         run: |
           python -m app.main review-apply --pr "${{ github.event.workflow_run.pull_requests[0].number }}"

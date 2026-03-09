@@ -1,2 +1,1 @@
-# src package initializer
-# (intentionally left empty)
+# This file makes the src directory a package.

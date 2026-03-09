@@ -1,12 +1,11 @@
 import argparse
-import sys
 import re
+import sys
 from pathlib import Path
-from typing import Tuple
 
 
 def count_words(text: str) -> int:
-    """Return the number of words in *text*.
+    """Return the number of words in the given text.
 
     A word is defined as a consecutive sequence of non‑whitespace characters.
     """
@@ -14,60 +13,52 @@ def count_words(text: str) -> int:
 
 
 def count_lines(text: str) -> int:
-    """Return the number of lines in *text* according to the specification."""
+    """Return the number of lines in the given text.
+
+    An empty string has 0 lines. If the text does not end with a newline,
+    the final segment is still counted as a line.
+    """
     if not text:
         return 0
-    newline_count = text.count("\n")
-    return newline_count if text.endswith("\n") else newline_count + 1
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return len(lines)
 
 
 def count_chars(text: str) -> int:
-    """Return the total number of characters in *text* (including whitespace)."""
+    """Return the total number of characters, including whitespace and newlines."""
     return len(text)
 
 
-def _process_text(text: str) -> Tuple[int, int, int]:
-    """Calculate words, lines and characters for *text*."""
-    return count_words(text), count_lines(text), count_chars(text)
-
-
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        prog="python -m src.wordcount",
-        description="Count words, lines and characters in a string or file.",
-    )
+    parser = argparse.ArgumentParser(description="Word, line and character counter.")
     group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--text", type=str, help="Text to analyse.")
     group.add_argument(
-        "--text",
-        type=str,
-        help="Text string to be analysed.",
-    )
-    group.add_argument(
-        "--file",
-        type=Path,
-        help="Path to a UTF‑8 encoded text file.",
+        "--file", type=Path, help="Path to a UTF‑8 encoded text file to analyse."
     )
     return parser.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = _parse_args(argv)
-
+def _read_input(args: argparse.Namespace) -> str:
     if args.text is not None:
-        text = args.text
-    else:
-        try:
-            text = args.file.read_text(encoding="utf-8")
-        except Exception as exc:
-            print(f"Error reading file: {exc}", file=sys.stderr)
-            return 1
+        return args.text
+    # args.file is guaranteed to be set because of mutually exclusive group
+    return args.file.read_text(encoding="utf-8")
 
-    words, lines, chars = _process_text(text)
-    print(f"words={words}")
-    print(f"lines={lines}")
-    print(f"chars={chars}")
-    return 0
+
+def main(argv: list[str] | None = None) -> None:
+    args = _parse_args(argv)
+    text = _read_input(args)
+
+    words = count_words(text)
+    lines = count_lines(text)
+    chars = count_chars(text)
+
+    output = f"words={words}\nlines={lines}\nchars={chars}"
+    print(output)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

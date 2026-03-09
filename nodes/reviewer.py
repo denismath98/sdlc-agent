@@ -165,11 +165,15 @@ def evaluate(repo, pr) -> ReviewResult:
             issues.append(f"CI is failing ({ci_state}).")
             suggestions.append("Fix CI failures and push updates.")
         elif ci_state == "pending":
-            issues.append("CI is still running (pending). Final approval is not allowed yet.")
+            issues.append(
+                "CI is still running (pending). Final approval is not allowed yet."
+            )
             suggestions.append("Wait for CI to finish before approving the PR.")
         elif ci_state is None:
             issues.append("CI status is unknown. Final approval is not allowed yet.")
-            suggestions.append("Ensure CI has started and finished successfully before approval.")
+            suggestions.append(
+                "Ensure CI has started and finished successfully before approval."
+            )
 
     if not pr_has_substantive_changes(pr):
         issues.append("PR has no substantive changes outside .ai/ (scaffold-only).")

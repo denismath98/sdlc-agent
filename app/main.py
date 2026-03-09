@@ -1,6 +1,7 @@
 import argparse
 
 from nodes.planner import plan_github_issue
+from nodes.reviewer import review_and_apply_pull_request
 from workflows.pr_flow import run_pr_flow
 from workflows.review_flow import run_review_flow, build_review_state
 from workflows.review_decision_flow import run_review_and_decide
@@ -29,6 +30,9 @@ def main() -> None:
 
     review_parser = subparsers.add_parser("review")
     review_parser.add_argument("--pr", type=int, required=True)
+
+    review_apply_parser = subparsers.add_parser("review-apply")
+    review_apply_parser.add_argument("--pr", type=int, required=True)
 
     plan_parser = subparsers.add_parser("plan")
     plan_parser.add_argument("--issue", type=int, required=True)
@@ -75,6 +79,11 @@ def main() -> None:
         flow_result = run_review_flow(args.pr)
         print(flow_result.result)
         print(flow_result.state)
+        return
+
+    if args.command == "review-apply":
+        res = review_and_apply_pull_request(args.pr)
+        print(res)
         return
 
     if args.command == "plan":

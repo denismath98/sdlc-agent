@@ -3,6 +3,8 @@ import os
 import re
 from typing import Optional
 
+from core.models import ReviewResult
+from prompts.registry import get_prompt
 from services.github_service import (
     apply_labels,
     ci_state_for_pr,
@@ -10,9 +12,7 @@ from services.github_service import (
     ensure_ai_labels,
     get_repo,
 )
-from core.models import ReviewResult
 from services.llm_service import llm_chat
-from prompts.registry import get_prompt
 
 
 def build_reviewer_prompt(issue_text: str, diff_text: str) -> str:
@@ -38,22 +38,6 @@ def pr_has_substantive_changes(pr) -> bool:
         if f.patch and f.patch.strip():
             return True
     return False
-
-
-def review_pull_request(pr_number: int) -> ReviewResult:
-    repo = get_repo()
-    pr = repo.get_pull(pr_number)
-
-    ensure_ai_labels(repo)
-
-    res = evaluate(repo, pr)
-    body = format_ai_review(res, pr_number=pr_number)
-
-    write_job_summary(res)
-    create_issue_comment(pr, body)
-    apply_labels(pr, res.status)
-
-    return res
 
 
 def collect_pr_diff(pr, max_chars: int = 8000) -> str:
@@ -153,10 +137,8 @@ def evaluate(repo, pr) -> ReviewResult:
             issues.append(f"Issue #{issue_no} not found or not accessible.")
             suggestions.append("Ensure PR references an existing Issue.")
 
-    # --- CI state (combined status) ---
     ci_state = ci_state_for_pr(repo, pr)
 
-    # --- CI details from workflow env (preferred, because it includes logs) ---
     pytest_exit = (os.getenv("PYTEST_EXIT_CODE") or "").strip()
     black_exit = (os.getenv("BLACK_EXIT_CODE") or "").strip()
     pytest_log_path = (os.getenv("PYTEST_LOG_PATH") or "").strip()
@@ -178,31 +160,23 @@ def evaluate(repo, pr) -> ReviewResult:
             suggestions.append("Black log tail:")
             suggestions.append(tail)
 
-    # If we DON'T have explicit exit codes, fall back to combined status.
     if not pytest_exit and not black_exit:
         if ci_state in ("failure", "error"):
             issues.append(f"CI is failing ({ci_state}).")
             suggestions.append("Fix CI failures and push updates.")
-
         elif ci_state == "pending":
             issues.append("CI is still running (pending). Final approval is not allowed yet.")
             suggestions.append("Wait for CI to finish before approving the PR.")
-
         elif ci_state is None:
             issues.append("CI status is unknown. Final approval is not allowed yet.")
             suggestions.append("Ensure CI has started and finished successfully before approval.")
 
-    # Hard-ish gate: scaffold-only PR
     if not pr_has_substantive_changes(pr):
         issues.append("PR has no substantive changes outside .ai/ (scaffold-only).")
         suggestions.append("Implement the requested functionality in code changes.")
 
-    # Deterministic status first
     status = "approved" if not issues else "needs-fix"
 
-    # LLM semantic review:
-    # - Never upgrades a failing deterministic review.
-    # - Can downgrade an otherwise-clean PR.
     diff_text = collect_pr_diff(pr, max_chars=8000)
     issue_text = clamp(issue_text, 2000)
 
@@ -232,13 +206,46 @@ def evaluate(repo, pr) -> ReviewResult:
     )
 
 
+def review_pull_request(pr_number: int) -> ReviewResult:
+    """
+    Safe review mode: only compute review result, no GitHub side effects.
+    """
+    repo = get_repo()
+    pr = repo.get_pull(pr_number)
+
+    ensure_ai_labels(repo)
+    return evaluate(repo, pr)
+
+
+def apply_review_result(pr_number: int, res: ReviewResult) -> None:
+    """
+    Apply review result to GitHub: comment, summary, labels.
+    """
+    repo = get_repo()
+    pr = repo.get_pull(pr_number)
+
+    body = format_ai_review(res, pr_number=pr_number)
+    write_job_summary(res)
+    create_issue_comment(pr, body)
+    apply_labels(pr, res.status)
+
+
+def review_and_apply_pull_request(pr_number: int) -> ReviewResult:
+    """
+    Full review mode with GitHub side effects.
+    """
+    res = review_pull_request(pr_number)
+    apply_review_result(pr_number, res)
+    return res
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pr", type=int, required=True)
     args = parser.parse_args()
 
     try:
-        res = review_pull_request(args.pr)
+        res = review_and_apply_pull_request(args.pr)
         print(f"OK: Reviewed PR #{args.pr} -> {res.status}")
     except Exception as e:
         repo = get_repo()

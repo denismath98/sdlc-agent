@@ -28,10 +28,9 @@ def load_tasks(path: str) -> Tuple[List[Task], List[str]]:
 
         item_errors = validate_task_dict(item)
         if item_errors:
-            errors.append(f"item {idx}: " + "; ".join(item_errors))
-            continue
-
-        tasks.append(Task(**item))
+            errors.append(f"item {idx}: {'; '.join(item_errors)}")
+        else:
+            tasks.append(Task(**item))
 
     return tasks, errors
 
@@ -52,9 +51,9 @@ def save_tasks(path: str, tasks: List[Task]) -> None:
 
 
 def summarize_tasks(tasks: List[Task]) -> dict[str, int]:
-    summary = {"todo": 0, "in_progress": 0, "done": 0, "total": 0}
+    summary = {"todo": 0, "in_progress": 0, "done": 0}
     for task in tasks:
         if task.status in summary:
             summary[task.status] += 1
-        summary["total"] += 1
+    summary["total"] = sum(summary.values())
     return summary

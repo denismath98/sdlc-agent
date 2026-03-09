@@ -33,6 +33,7 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ github.token }}
+          ref: ${{ github.head_ref }}
 
       - uses: actions/setup-python@v5
         with:

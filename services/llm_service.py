@@ -1,0 +1,286 @@
+import json
+import os
+from dataclasses import dataclass
+from typing import Dict, Optional, Tuple
+
+import requests
+
+
+@dataclass
+class LLMConfig:
+    mode: str = "mock"  # mock | openai_chat | hf_inference | ollama_chat | custom_http
+    base_url: str = ""
+    api_key: str = ""
+    model: str = ""
+    timeout_s: int = 30
+    temperature: float = 0.2
+    max_tokens: int = 400
+    headers: Dict[str, str] | None = None  # templated headers
+    endpoints: Dict[str, str] | None = None  # endpoint paths
+
+
+MOCK_TEXT = "status=approved\nissues:\n- None\nsuggestions:\n- None\n"
+
+
+def _safe_json_load(raw: str) -> dict:
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {}
+
+
+def load_llm_config() -> LLMConfig:
+    raw = (os.getenv("LLM_CONFIG_JSON") or "").strip()
+    if not raw:
+        return LLMConfig(mode="mock")
+
+    data = _safe_json_load(raw)
+    mode = (data.get("mode") or "mock").strip()
+
+    headers = data.get("headers") or {}
+    endpoints = data.get("endpoints") or {}
+
+    return LLMConfig(
+        mode=mode,
+        base_url=(data.get("base_url") or "").strip(),
+        api_key=(data.get("api_key") or "").strip(),
+        model=(data.get("model") or "").strip(),
+        timeout_s=int(data.get("timeout_s", 30)),
+        temperature=float(data.get("temperature", 0.2)),
+        max_tokens=int(data.get("max_tokens", 400)),
+        headers=headers,
+        endpoints=endpoints,
+    )
+
+
+def _render_template(s: str, cfg: LLMConfig) -> str:
+    """Supports ${api_key} and {model}."""
+    if s is None:
+        return ""
+    s = s.replace("${api_key}", cfg.api_key)
+    s = s.replace("{model}", cfg.model)
+    return s
+
+
+def _build_headers(cfg: LLMConfig) -> Dict[str, str]:
+    headers: Dict[str, str] = {}
+    if cfg.headers:
+        for k, v in cfg.headers.items():
+            headers[str(k)] = _render_template(str(v), cfg)
+
+    headers.setdefault("Content-Type", "application/json")
+    headers.setdefault("Accept", "application/json")
+    return headers
+
+
+def _join_url(base_url: str, path: str) -> str:
+    return base_url.rstrip("/") + "/" + path.lstrip("/")
+
+
+def _get_endpoint(cfg: LLMConfig, key: str, default_path: str) -> str:
+    if cfg.endpoints and cfg.endpoints.get(key):
+        return cfg.endpoints[key]
+    return default_path
+
+
+def _clip(s: str, n: int = 800) -> str:
+    s = (s or "").strip()
+    if len(s) <= n:
+        return s
+    return s[:n] + "..."
+
+
+def _http_error_text(e: requests.HTTPError) -> str:
+    status = getattr(e.response, "status_code", None)
+    body = ""
+    try:
+        body = e.response.text if e.response is not None else ""
+    except Exception:
+        body = ""
+    return f"LLM_ERROR: HTTP {status}: {_clip(body)}"
+
+
+def _extract_openai_text(data: dict) -> str:
+    """
+    Extract text from OpenAI-compatible responses, including HF Router variants.
+
+    Supports:
+    - choices[0].message.content as str
+    - choices[0].message.content as list[{type:'text', text:'...'}]
+    - choices[0].text
+    - choices[0].message.reasoning (fallback for some reasoning/oss models)
+    - top-level output_text/content/response/result
+    """
+    choices = data.get("choices") or []
+    if choices:
+        c0 = choices[0] or {}
+        msg = c0.get("message") or {}
+
+        # A) Standard OpenAI: string content
+        content = msg.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+
+        # B) Some providers: blocks list
+        if isinstance(content, list):
+            texts: list[str] = []
+            for blk in content:
+                if isinstance(blk, dict):
+                    t = blk.get("text")
+                    if isinstance(t, str) and t.strip():
+                        texts.append(t.strip())
+            if texts:
+                return "\n".join(texts).strip()
+
+        # C) Some providers: choices[0].text
+        text = c0.get("text")
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+
+        # D) HF Router / OSS “reasoning” models may return reasoning without content
+        reasoning = msg.get("reasoning")
+        if isinstance(reasoning, str) and reasoning.strip():
+            return reasoning.strip()
+
+    # E) Some providers: top-level fields
+    for key in ("output_text", "content", "response", "result"):
+        val = data.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+
+    raise RuntimeError(f"Unexpected openai_chat response schema: {str(data)[:800]}")
+
+
+def _call_openai_chat(cfg: LLMConfig, prompt: str) -> str:
+    path = _get_endpoint(cfg, "chat_completions", "/v1/chat/completions")
+    url = _join_url(cfg.base_url, path)
+    headers = _build_headers(cfg)
+
+    payload = {
+        "model": cfg.model or "gpt-4o-mini",
+        "messages": [
+            {"role": "system", "content": "You are a strict code reviewer."},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": cfg.temperature,
+        "max_tokens": cfg.max_tokens,
+    }
+
+    r = requests.post(url, json=payload, headers=headers, timeout=cfg.timeout_s)
+    r.raise_for_status()
+    data = r.json()
+    return _extract_openai_text(data)
+
+
+def _call_ollama_chat(cfg: LLMConfig, prompt: str) -> str:
+    path = _get_endpoint(cfg, "ollama_chat", "/api/chat")
+    url = _join_url(cfg.base_url, path)
+    headers = _build_headers(cfg)
+
+    payload = {
+        "model": cfg.model or "llama3",
+        "messages": [
+            {"role": "system", "content": "You are a strict code reviewer."},
+            {"role": "user", "content": prompt},
+        ],
+        "stream": False,
+        "options": {"temperature": cfg.temperature},
+    }
+
+    r = requests.post(url, json=payload, headers=headers, timeout=cfg.timeout_s)
+    r.raise_for_status()
+    data = r.json()
+    # Ollama: {"message": {"content": "..."}}
+    content = (data.get("message") or {}).get("content")
+    if isinstance(content, str) and content.strip():
+        return content.strip()
+    # fallback (some variants)
+    resp = data.get("response")
+    return resp.strip() if isinstance(resp, str) else ""
+
+
+def _call_hf_inference(cfg: LLMConfig, prompt: str) -> str:
+    if not cfg.model:
+        raise RuntimeError("hf_inference requires 'model' in LLM_CONFIG_JSON")
+
+    path = _get_endpoint(cfg, "hf_model", "/models/{model}")
+    path = _render_template(path, cfg)
+    url = _join_url(cfg.base_url, path)
+    headers = _build_headers(cfg)
+
+    payload = {
+        "inputs": prompt,
+        "parameters": {
+            "max_new_tokens": min(cfg.max_tokens, 400),
+            "return_full_text": False,
+        },
+    }
+
+    r = requests.post(url, json=payload, headers=headers, timeout=cfg.timeout_s)
+    r.raise_for_status()
+    data = r.json()
+
+    if (
+        isinstance(data, list)
+        and data
+        and isinstance(data[0], dict)
+        and "generated_text" in data[0]
+    ):
+        return str(data[0]["generated_text"])
+
+    if isinstance(data, dict) and "error" in data:
+        raise RuntimeError(f"HF inference error: {data['error']}")
+
+    return str(data)
+
+
+def llm_chat(prompt: str) -> Tuple[str, str]:
+    """
+    Returns (text, mode_used). Never raises due to provider problems (safe for CI).
+
+    On provider failures, returns a non-empty string starting with 'LLM_ERROR:'.
+    """
+    cfg = load_llm_config()
+
+    if cfg.mode == "mock" or not cfg.base_url:
+        return MOCK_TEXT, "mock"
+
+    def retryable(status: Optional[int]) -> bool:
+        return status in (429, 500, 502, 503, 504)
+
+    for attempt in range(2):
+        try:
+            if cfg.mode == "openai_chat":
+                return _call_openai_chat(cfg, prompt), "openai_chat"
+            if cfg.mode == "ollama_chat":
+                return _call_ollama_chat(cfg, prompt), "ollama_chat"
+            if cfg.mode == "hf_inference":
+                return _call_hf_inference(cfg, prompt), "hf_inference"
+            if cfg.mode == "custom_http":
+                return (
+                    "LLM_ERROR: custom_http mode is not implemented.",
+                    "custom_http:error",
+                )
+
+            return (
+                f"LLM_ERROR: unknown mode '{cfg.mode}'.",
+                f"{cfg.mode}:error",
+            )
+
+        except requests.HTTPError as e:
+            status = getattr(e.response, "status_code", None)
+            if attempt == 0 and retryable(status):
+                continue
+            return _http_error_text(e), f"{cfg.mode}:error({status})"
+
+        except requests.RequestException as e:
+            if attempt == 0:
+                continue
+            return f"LLM_ERROR: RequestException: {e}", f"{cfg.mode}:error"
+
+        except Exception as e:
+            if attempt == 0:
+                continue
+            return f"LLM_ERROR: {type(e).__name__}: {e}", f"{cfg.mode}:error"
+
+    return "LLM_ERROR: unknown failure", f"{cfg.mode}:error"

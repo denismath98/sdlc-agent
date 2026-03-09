@@ -47,5 +47,4 @@ jobs:
           PYTEST_LOG_PATH: ci-logs/pytest.log
           BLACK_LOG_PATH: ci-logs/black.log
         run: |
-          python agents/review_agent/reviewer.py \
-            --pr "${{ github.event.workflow_run.pull_requests[0].number }}"
+          python -m app.main review --pr "${{ github.event.workflow_run.pull_requests[0].number }}"

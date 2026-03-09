@@ -32,7 +32,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GH_PAT }}
+          token: ${{ github.token }}
+          ref: ${{ github.head_ref }}
 
       - uses: actions/setup-python@v5
         with:
@@ -46,12 +47,12 @@ jobs:
 
       - name: Run Code Agent
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+          GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           LLM_CONFIG_JSON: ${{ secrets.LLM_CONFIG_JSON }}
         run: |
           if [ "${{ github.event_name }}" = "issues" ]; then
-            python run_code_agent.py --issue "${{ github.event.issue.number }}"
+            python -m app.main issue --issue "${{ github.event.issue.number }}"
           else
-            python run_code_agent.py --pr "${{ github.event.pull_request.number }}"
+            python -m app.main pr --pr "${{ github.event.pull_request.number }}"
           fi

@@ -3,10 +3,10 @@ import os
 import re
 import subprocess
 from datetime import datetime
-from typing import Dict, Tuple
+from typing import Dict
 
 from github import Auth, Github
-from agents.llm_client import llm_chat
+from services.llm_service import llm_chat
 
 AI_DIR = ".ai"
 MAX_ITERATIONS = 3

@@ -1,27 +1,28 @@
-name: AI Reviewer
+name: AI Review
 
 on:
   workflow_run:
     workflows: ["PR CI"]
     types: [completed]
 
-concurrency:
-  group: reviewer-${{ github.event.workflow_run.pull_requests[0].number }}
-  cancel-in-progress: false
-
 jobs:
-  reviewer:
-    if: ${{ github.event.workflow_run.event == 'pull_request' }}
+  review:
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request'
+
     runs-on: ubuntu-latest
 
     permissions:
-      actions: read
+      contents: read
       pull-requests: write
       issues: write
-      contents: read
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ github.token }}
 
       - uses: actions/setup-python@v5
         with:
@@ -32,19 +33,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install .
 
-      - name: Download CI logs (from PR CI run)
-        uses: dawidd6/action-download-artifact@v3
-        with:
-          run_id: ${{ github.event.workflow_run.id }}
-          name: ci-logs
-          path: ci-logs
-
-      - name: Run AI reviewer
+      - name: Run reviewer
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+          GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           LLM_CONFIG_JSON: ${{ secrets.LLM_CONFIG_JSON }}
-          PYTEST_LOG_PATH: ci-logs/pytest.log
-          BLACK_LOG_PATH: ci-logs/black.log
         run: |
-          python -m app.main review --pr "${{ github.event.workflow_run.pull_requests[0].number }}"
+          python -m app.main review-apply --pr "${{ github.event.workflow_run.pull_requests[0].number }}"

@@ -51,7 +51,7 @@ jobs:
           LLM_CONFIG_JSON: ${{ secrets.LLM_CONFIG_JSON }}
         run: |
           if [ "${{ github.event_name }}" = "issues" ]; then
-            python run_code_agent.py --issue "${{ github.event.issue.number }}"
+            python -m app.main issue --issue "${{ github.event.issue.number }}"
           else
-            python run_code_agent.py --pr "${{ github.event.pull_request.number }}"
+            python -m app.main pr --pr "${{ github.event.pull_request.number }}"
           fi

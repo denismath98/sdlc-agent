@@ -1,62 +1,31 @@
 import argparse
 import os
 import re
-from dataclasses import dataclass
 from typing import Optional
 
-from github import Auth, Github
-
+from services.github_service import (
+    apply_labels,
+    ci_state_for_pr,
+    create_issue_comment,
+    ensure_ai_labels,
+    get_repo,
+)
+from core.models import ReviewResult
 from services.llm_service import llm_chat
-
-APPROVED_LABEL = "ai:approved"
-NEEDS_FIX_LABEL = "ai:needs-fix"
+from prompts.registry import get_prompt
 
 
-@dataclass
-class ReviewResult:
-    status: str  # "approved" | "needs-fix"
-    issues: list[str]
-    suggestions: list[str]
-    issue_number: Optional[int]
-    ci_state: Optional[str]
-
-
-def get_repo_full_name() -> str:
-    repo = os.environ.get("GITHUB_REPOSITORY")
-    if not repo:
-        raise RuntimeError("GITHUB_REPOSITORY env var is missing")
-    return repo
-
-
-def get_token() -> str:
-    token = os.environ.get("GITHUB_TOKEN")
-    if not token:
-        raise RuntimeError("GITHUB_TOKEN env var is missing")
-    return token
-
-
-def ensure_label(repo, name: str, color: str) -> None:
-    try:
-        repo.get_label(name)
-    except Exception:
-        repo.create_label(
-            name=name, color=color, description="Auto label by AI reviewer"
-        )
+def build_reviewer_prompt(issue_text: str, diff_text: str) -> str:
+    template = get_prompt("reviewer.semantic")
+    return template.format(
+        issue=issue_text,
+        diff=diff_text,
+    )
 
 
 def extract_issue_number(pr_body: str) -> Optional[int]:
     m = re.search(r"Closes\s+#(\d+)", pr_body or "", flags=re.IGNORECASE)
     return int(m.group(1)) if m else None
-
-
-def ci_state_for_pr(repo, pr) -> Optional[str]:
-    """Best-effort combined status for PR head SHA."""
-    try:
-        combined = repo.get_commit(pr.head.sha).get_combined_status()
-        # success|failure|error|pending
-        return combined.state
-    except Exception:
-        return None
 
 
 def pr_has_substantive_changes(pr) -> bool:
@@ -69,6 +38,22 @@ def pr_has_substantive_changes(pr) -> bool:
         if f.patch and f.patch.strip():
             return True
     return False
+
+
+def review_pull_request(pr_number: int) -> ReviewResult:
+    repo = get_repo()
+    pr = repo.get_pull(pr_number)
+
+    ensure_ai_labels(repo)
+
+    res = evaluate(repo, pr)
+    body = format_ai_review(res, pr_number=pr_number)
+
+    write_job_summary(res)
+    create_issue_comment(pr, body)
+    apply_labels(pr, res.status)
+
+    return res
 
 
 def collect_pr_diff(pr, max_chars: int = 8000) -> str:
@@ -150,26 +135,6 @@ def write_job_summary(res: ReviewResult) -> None:
         f.write("\n".join(lines) + "\n")
 
 
-def apply_labels(pr, status: str) -> None:
-    """
-    If needs-fix: touch label (remove+add) so pull_request:labeled triggers every time.
-    """
-    current = {lbl.name for lbl in pr.get_labels()}
-
-    if status == "approved":
-        if NEEDS_FIX_LABEL in current:
-            pr.remove_from_labels(NEEDS_FIX_LABEL)
-        pr.add_to_labels(APPROVED_LABEL)
-        return
-
-    # needs-fix
-    if APPROVED_LABEL in current:
-        pr.remove_from_labels(APPROVED_LABEL)
-    if NEEDS_FIX_LABEL in current:
-        pr.remove_from_labels(NEEDS_FIX_LABEL)
-    pr.add_to_labels(NEEDS_FIX_LABEL)
-
-
 def evaluate(repo, pr) -> ReviewResult:
     issues: list[str] = []
     suggestions: list[str] = []
@@ -235,28 +200,7 @@ def evaluate(repo, pr) -> ReviewResult:
     diff_text = collect_pr_diff(pr, max_chars=8000)
     issue_text = clamp(issue_text, 2000)
 
-    prompt = f"""
-    Ты — строгий code reviewer.
-
-    Определение DONE:
-    - PR считается DONE только если по diff видно, что требования Issue реализованы.
-    - Если по diff нельзя уверенно подтвердить реализацию — обязательно status=needs-fix.
-    - Будь строгим. Не додумывай.
-
-    Issue:
-    {issue_text}
-
-    PR diff:
-    {diff_text}
-
-    Верни СТРОГО в формате:
-
-    status=approved|needs-fix
-    issues:
-    - ...
-    suggestions:
-    - ...
-    """.strip()
+    prompt = build_reviewer_prompt(issue_text=issue_text, diff_text=diff_text)
 
     llm_out, llm_mode = llm_chat(prompt)
     llm_out = (llm_out or "").strip()
@@ -287,26 +231,13 @@ def main() -> None:
     parser.add_argument("--pr", type=int, required=True)
     args = parser.parse_args()
 
-    gh = Github(auth=Auth.Token(get_token()))
-    repo = gh.get_repo(get_repo_full_name())
-    pr = repo.get_pull(args.pr)
-
-    ensure_label(repo, APPROVED_LABEL, "2da44e")
-    ensure_label(repo, NEEDS_FIX_LABEL, "d1242f")
-
     try:
-        res = evaluate(repo, pr)
-        body = format_ai_review(res, pr_number=args.pr)
-
-        write_job_summary(res)
-        pr.create_issue_comment(body)
-        # pr.create_review(body=body, event="COMMENT")
-
-        apply_labels(pr, res.status)
-
+        res = review_pull_request(args.pr)
         print(f"OK: Reviewed PR #{args.pr} -> {res.status}")
     except Exception as e:
-        # Always leave a visible comment if reviewer crashes
+        repo = get_repo()
+        pr = repo.get_pull(args.pr)
+
         body = (
             "AI-REVIEW:\n"
             "status=needs-fix\n"
@@ -319,7 +250,7 @@ def main() -> None:
             "- Check reviewer workflow logs.\n"
         )
         try:
-            pr.create_issue_comment(body)
+            create_issue_comment(pr, body)
         except Exception:
             pass
         raise

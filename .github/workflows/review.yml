@@ -36,7 +36,7 @@ jobs:
 
       - name: Run reviewer
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           LLM_CONFIG_JSON: ${{ secrets.LLM_CONFIG_JSON }}
           CI_WORKFLOW_CONCLUSION: ${{ github.event.workflow_run.conclusion }}

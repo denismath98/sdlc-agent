@@ -35,7 +35,6 @@ from services.git_service import (
     push_branch,
     sh,
 )
-from services.ai_artifacts_service import AI_DIR, ensure_ai_dir, write_issue_artifact
 
 __all__ = [
     "LLMConfig",
@@ -66,9 +65,6 @@ __all__ = [
     "push_branch",
     "create_pull_request",
     "create_issue_comment_for_issue",
-    "AI_DIR",
-    "ensure_ai_dir",
-    "write_issue_artifact",
     "extract_issue_number_from_pr_body",
     "extract_iteration_from_pr_body",
     "update_pr_iteration",

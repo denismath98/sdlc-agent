@@ -13,6 +13,7 @@ from services.github_service import (
     get_repo,
 )
 from services.llm_service import llm_chat
+from services.sdlc_config_service import load_sdlc_config
 
 
 def build_reviewer_prompt(issue_text: str, diff_text: str) -> str:
@@ -29,7 +30,6 @@ def extract_issue_number(pr_body: str) -> Optional[int]:
 
 
 def pr_has_substantive_changes(pr) -> bool:
-    """True if PR changes something outside .ai/ (scaffold-only check)."""
     for f in pr.get_files():
         if f.filename.startswith(".ai/"):
             continue
@@ -99,10 +99,6 @@ def format_ai_review(res: ReviewResult, pr_number: int) -> str:
 
 
 def ci_state_from_workflow_env() -> Optional[str]:
-    """
-    Map workflow_run conclusion to reviewer-compatible CI state.
-    Used to avoid reading combined status while reviewer itself is running.
-    """
     conclusion = (os.getenv("CI_WORKFLOW_CONCLUSION") or "").strip().lower()
 
     if not conclusion:
@@ -148,6 +144,8 @@ def write_job_summary(res: ReviewResult) -> None:
 
 
 def evaluate(repo, pr) -> ReviewResult:
+    config = load_sdlc_config()
+
     issues: list[str] = []
     suggestions: list[str] = []
 
@@ -165,7 +163,7 @@ def evaluate(repo, pr) -> ReviewResult:
             issues.append(f"Issue #{issue_no} not found or not accessible.")
             suggestions.append("Ensure PR references an existing Issue.")
 
-    ci_state = ci_state_from_workflow_env() or ci_state_for_pr(repo, pr)
+    ci_state = ci_state_for_pr(repo, pr)
     ci_workflow_name = (os.getenv("CI_WORKFLOW_NAME") or "").strip()
     if ci_workflow_name:
         suggestions.append(f"CI workflow source: {ci_workflow_name}")
@@ -192,15 +190,16 @@ def evaluate(repo, pr) -> ReviewResult:
             suggestions.append(tail)
 
     if not pytest_exit and not black_exit:
-        if ci_state in ("failure", "error"):
+        if ci_state in ("failure", "error") and config.review.require_ci_success:
             issues.append(f"CI is failing ({ci_state}).")
             suggestions.append("Fix CI failures and push updates.")
-        elif ci_state == "pending":
+        elif ci_state == "pending" and config.review.require_ci_success:
             issues.append(
                 "CI is still running (pending). Final approval is not allowed yet."
             )
             suggestions.append("Wait for CI to finish before approving the PR.")
-        elif ci_state is None:
+
+        elif ci_state is None and config.review.require_ci_success:
             issues.append("CI status is unknown. Final approval is not allowed yet.")
             suggestions.append(
                 "Ensure CI has started and finished successfully before approval."

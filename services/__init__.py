@@ -35,6 +35,7 @@ from services.git_service import (
     push_branch,
     sh,
 )
+from services.sdlc_config_service import load_sdlc_config
 
 __all__ = [
     "LLMConfig",
@@ -71,4 +72,5 @@ __all__ = [
     "create_pr_comment",
     "get_pr_issue_comments",
     "get_latest_ai_review_comment",
+    "load_sdlc_config",
 ]

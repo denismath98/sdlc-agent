@@ -1,12 +1,6 @@
 {
   "default_branch": "main",
   "max_iterations": 3,
-  "repo_path": ".",
-  "python_version": "3.11",
-  "ci": {
-    "enable_black_check": true,
-    "enable_pytest": true
-  },
   "review": {
     "require_ci_success": true
   }

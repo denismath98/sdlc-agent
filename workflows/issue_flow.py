@@ -1,11 +1,13 @@
-from core.models import DeveloperResult, StatefulDeveloperResult
+from core.models import StatefulDeveloperResult
 from core.state import SDLCState
 from services.github_issue_service import load_issue_data
+from services.sdlc_config_service import load_sdlc_config
 from nodes.planner import plan_github_issue
 from nodes.developer import run_developer_for_issue
 
 
 def build_initial_issue_state(issue_number: int) -> SDLCState:
+    config = load_sdlc_config()
     issue_data = load_issue_data(issue_number)
     plan_result = plan_github_issue(issue_number)
 
@@ -16,7 +18,7 @@ def build_initial_issue_state(issue_number: int) -> SDLCState:
         branch_name="",
         pr_number=None,
         iteration=1,
-        max_iterations=3,
+        max_iterations=config.max_iterations,
         plan=plan_result.plan,
         changed_files=[],
         ci_status=None,

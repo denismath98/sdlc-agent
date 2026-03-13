@@ -24,9 +24,8 @@ from services.git_service import (
 )
 from services.ai_artifacts_service import write_issue_artifact
 from services.llm_service import llm_chat
+from services.sdlc_config_service import load_sdlc_config
 from prompts.registry import get_prompt
-
-MAX_ITERATIONS = 3
 
 
 def build_developer_prompt(
@@ -94,7 +93,9 @@ def run_developer_for_issue(issue_number: int, iteration: int = 1) -> DeveloperR
     )
 
     branch_name = f"issue-{issue_number}"
-    checkout_new_branch(branch_name, repo.default_branch)
+    config = load_sdlc_config()
+    base_branch = config.default_branch or repo.default_branch
+    checkout_new_branch(branch_name, base_branch)
 
     prompt = build_developer_prompt(
         issue_title=issue_data.title,
@@ -134,7 +135,7 @@ def run_developer_for_issue(issue_number: int, iteration: int = 1) -> DeveloperR
         title=f"Implement #{issue_number}: {issue_data.title}",
         body=f"Closes #{issue_number}\n\nAI-ITERATION: {iteration}",
         head=branch_name,
-        base=repo.default_branch,
+        base=base_branch,
     )
 
     create_issue_comment_for_issue(
@@ -151,10 +152,11 @@ def run_developer_for_issue(issue_number: int, iteration: int = 1) -> DeveloperR
 
 
 def run_developer_for_pr(pr_number: int) -> DeveloperResult:
+    config = load_sdlc_config()
     pr = get_pull_request(pr_number)
     iteration = extract_iteration_from_pr_body(pr.body or "")
 
-    if iteration >= MAX_ITERATIONS:
+    if iteration >= config.max_iterations:
         create_pr_comment(pr, "Code Agent: iteration limit reached.")
         return DeveloperResult(
             success=False,

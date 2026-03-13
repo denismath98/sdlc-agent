@@ -53,6 +53,7 @@ def ensure_ai_labels(repo) -> None:
 
 
 def ci_state_for_pr(repo, pr) -> Optional[str]:
+    """Best-effort combined status for PR head SHA."""
     try:
         combined = repo.get_commit(pr.head.sha).get_combined_status()
         return combined.state
@@ -61,6 +62,9 @@ def ci_state_for_pr(repo, pr) -> Optional[str]:
 
 
 def apply_labels(pr, status: str) -> None:
+    """
+    If needs-fix: touch label (remove+add) so pull_request:labeled triggers every time.
+    """
     current = {lbl.name for lbl in pr.get_labels()}
 
     if status == "approved":

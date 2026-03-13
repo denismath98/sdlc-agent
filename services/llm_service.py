@@ -54,6 +54,7 @@ def load_llm_config() -> LLMConfig:
 
 
 def _render_template(s: str, cfg: LLMConfig) -> str:
+    """Supports ${api_key} and {model}."""
     if s is None:
         return ""
     s = s.replace("${api_key}", cfg.api_key)
@@ -100,15 +101,27 @@ def _http_error_text(e: requests.HTTPError) -> str:
 
 
 def _extract_openai_text(data: dict) -> str:
+    """
+    Extract text from OpenAI-compatible responses, including HF Router variants.
+
+    Supports:
+    - choices[0].message.content as str
+    - choices[0].message.content as list[{type:'text', text:'...'}]
+    - choices[0].text
+    - choices[0].message.reasoning (fallback for some reasoning/oss models)
+    - top-level output_text/content/response/result
+    """
     choices = data.get("choices") or []
     if choices:
         c0 = choices[0] or {}
         msg = c0.get("message") or {}
 
+        # A) Standard OpenAI: string content
         content = msg.get("content")
         if isinstance(content, str) and content.strip():
             return content.strip()
 
+        # B) Some providers: blocks list
         if isinstance(content, list):
             texts: list[str] = []
             for blk in content:
@@ -119,14 +132,17 @@ def _extract_openai_text(data: dict) -> str:
             if texts:
                 return "\n".join(texts).strip()
 
+        # C) Some providers: choices[0].text
         text = c0.get("text")
         if isinstance(text, str) and text.strip():
             return text.strip()
 
+        # D) HF Router / OSS “reasoning” models may return reasoning without content
         reasoning = msg.get("reasoning")
         if isinstance(reasoning, str) and reasoning.strip():
             return reasoning.strip()
 
+    # E) Some providers: top-level fields
     for key in ("output_text", "content", "response", "result"):
         val = data.get(key)
         if isinstance(val, str) and val.strip():
@@ -174,11 +190,11 @@ def _call_ollama_chat(cfg: LLMConfig, prompt: str) -> str:
     r = requests.post(url, json=payload, headers=headers, timeout=cfg.timeout_s)
     r.raise_for_status()
     data = r.json()
-
+    # Ollama: {"message": {"content": "..."}}
     content = (data.get("message") or {}).get("content")
     if isinstance(content, str) and content.strip():
         return content.strip()
-
+    # fallback (some variants)
     resp = data.get("response")
     return resp.strip() if isinstance(resp, str) else ""
 
@@ -219,6 +235,11 @@ def _call_hf_inference(cfg: LLMConfig, prompt: str) -> str:
 
 
 def llm_chat(prompt: str) -> Tuple[str, str]:
+    """
+    Returns (text, mode_used). Never raises due to provider problems (safe for CI).
+
+    On provider failures, returns a non-empty string starting with 'LLM_ERROR:'.
+    """
     cfg = load_llm_config()
 
     if cfg.mode == "mock" or not cfg.base_url:

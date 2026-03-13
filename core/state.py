@@ -12,6 +12,7 @@ class SDLCState(TypedDict):
     iteration: int
     max_iterations: int
 
+    plan: List[str]
     changed_files: List[str]
 
     ci_status: Optional[str]

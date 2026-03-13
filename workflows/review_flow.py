@@ -1,4 +1,4 @@
-from core.models import StatefulReviewResult
+from core.models import ReviewResult, StatefulReviewResult
 from core.state import SDLCState
 from services.github_service import (
     extract_issue_number_from_pr_body,
@@ -31,6 +31,7 @@ def build_review_state(pr_number: int) -> SDLCState:
         pr_number=pr.number,
         iteration=iteration,
         max_iterations=3,
+        plan=[],
         changed_files=[],
         ci_status=None,
         ci_summary=[],

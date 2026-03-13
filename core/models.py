@@ -6,18 +6,6 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class PlanResult:
-    plan: List[str] = field(default_factory=list)
-    acceptance_criteria: List[str] = field(default_factory=list)
-
-
-@dataclass
-class CIResult:
-    status: str
-    summary: List[str] = field(default_factory=list)
-
-
-@dataclass
 class ReviewResult:
     status: str
     issues: List[str] = field(default_factory=list)
@@ -45,21 +33,3 @@ class StatefulDeveloperResult:
 class StatefulReviewResult:
     result: ReviewResult
     state: "SDLCState"
-
-
-@dataclass
-class ReviewDecisionResult:
-    review_result: ReviewResult
-    state: "SDLCState"
-    decision: str
-
-
-@dataclass
-class FullIterationResult:
-    first_review_result: ReviewResult
-    first_state: "SDLCState"
-    first_decision: str
-    developer_result: Optional[DeveloperResult] = None
-    second_review_result: Optional[ReviewResult] = None
-    second_state: Optional["SDLCState"] = None
-    second_decision: Optional[str] = None

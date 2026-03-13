@@ -3,11 +3,6 @@ from typing import Dict
 
 
 def parse_files_from_llm(text: str) -> Dict[str, str]:
-    """
-    Parses:
-    FILE: path
-    <content>
-    """
     files: Dict[str, str] = {}
     current_path = None
     buffer = []

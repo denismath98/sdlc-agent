@@ -6,7 +6,6 @@ from services.github_service import (
     get_pull_request,
 )
 from services.github_issue_service import load_issue_data
-from nodes.planner import plan_github_issue
 from nodes.developer import run_developer_for_pr
 
 
@@ -25,9 +24,6 @@ def build_pr_state(pr_number: int) -> SDLCState:
         issue_title = issue_data.title
         issue_body = issue_data.body
 
-        plan_result = plan_github_issue(issue_number)
-        plan = plan_result.plan
-
     return SDLCState(
         issue_number=issue_number or 0,
         issue_title=issue_title,
@@ -36,7 +32,6 @@ def build_pr_state(pr_number: int) -> SDLCState:
         pr_number=pr.number,
         iteration=iteration,
         max_iterations=3,
-        plan=plan,
         changed_files=[],
         ci_status=None,
         ci_summary=[],

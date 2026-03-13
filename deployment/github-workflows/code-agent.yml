@@ -1,0 +1,62 @@
+name: Code Agent
+
+on:
+  issues:
+    types: [opened]
+  pull_request:
+    types: [labeled]
+
+concurrency:
+  group: code-agent-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  code-agent:
+    if: |
+      github.event_name == 'issues' ||
+      (
+        github.event_name == 'pull_request' &&
+        github.event.action == 'labeled' &&
+        github.event.label.name == 'ai:needs-fix'
+      )
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Configure git remote with PAT
+        run: |
+          git remote set-url origin https://x-access-token:${{ secrets.GH_PAT }}@github.com/${{ github.repository }}.git
+
+      - name: Run Code Agent
+        run: |
+          if [ "${{ github.event_name }}" = "issues" ]; then
+            docker run --rm \
+              -v "${{ github.workspace }}:/repo" \
+              -e GITHUB_TOKEN="${{ secrets.GH_PAT }}" \
+              -e GITHUB_REPOSITORY="${{ github.repository }}" \
+              -e LLM_CONFIG_JSON='${{ secrets.LLM_CONFIG_JSON }}' \
+              -e REPO_PATH=/repo \
+              ghcr.io/denismath98/sdlc-agent:latest \
+              issue --issue "${{ github.event.issue.number }}"
+          else
+            docker run --rm \
+              -v "${{ github.workspace }}:/repo" \
+              -e GITHUB_TOKEN="${{ secrets.GH_PAT }}" \
+              -e GITHUB_REPOSITORY="${{ github.repository }}" \
+              -e LLM_CONFIG_JSON='${{ secrets.LLM_CONFIG_JSON }}' \
+              -e REPO_PATH=/repo \
+              ghcr.io/denismath98/sdlc-agent:latest \
+              pr --pr "${{ github.event.pull_request.number }}"
+          fi

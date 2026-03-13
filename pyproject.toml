@@ -11,13 +11,12 @@ requires-python = ">=3.11"
 dependencies = [
     "PyGithub>=2.3.0",
     "GitPython>=3.1.40",
-    "requests>=2.31.0",
-    "langgraph>=1.0.7"
+    "requests>=2.31.0"
 ]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["agents*"]
+include = ["app*", "core*", "nodes*", "prompts*", "services*", "workflows*"]
 
 [tool.black]
 line-length = 88

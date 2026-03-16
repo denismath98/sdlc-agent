@@ -25,6 +25,7 @@ from services.git_service import (
 from services.ai_artifacts_service import write_issue_artifact
 from services.llm_service import llm_chat
 from services.sdlc_config_service import load_sdlc_config
+from services.code_context_service import extract_context_file_paths, read_context_files
 from prompts.registry import get_prompt
 
 
@@ -33,14 +34,17 @@ def build_developer_prompt(
     issue_body: str,
     plan: list[str],
     review_feedback: str = "",
+    code_context: str = "",
 ) -> str:
     plan_block = (
         "\n".join(f"- {step}" for step in plan)
         if plan
-        else "- Implement the requested changes."
+        else "- Реализовать требуемые изменения."
     )
 
-    feedback_block = review_feedback.strip() if review_feedback else "None"
+    feedback_block = review_feedback.strip() if review_feedback else "Нет"
+
+    context_block = code_context.strip() if code_context else "Контекстные файлы не предоставлены."
 
     template = get_prompt("developer.code")
     return template.format(
@@ -48,6 +52,7 @@ def build_developer_prompt(
         body=issue_body,
         plan=plan_block,
         feedback=feedback_block,
+        code_context=context_block,
     )
 
 
@@ -95,12 +100,16 @@ def run_developer_for_issue(issue_number: int, iteration: int = 1) -> DeveloperR
     branch_name = f"issue-{issue_number}"
     config = load_sdlc_config()
     base_branch = config.default_branch or repo.default_branch
+    print(f"Using configured base branch: {base_branch}")
     checkout_new_branch(branch_name, base_branch)
 
+    context_paths = extract_context_file_paths(issue_data.body or "")
+    code_context = read_context_files(context_paths)
     prompt = build_developer_prompt(
         issue_title=issue_data.title,
         issue_body=issue_data.body,
         plan=plan_result.plan,
+        code_context=code_context,
     )
 
     raw, mode = llm_chat(prompt)
@@ -185,11 +194,15 @@ def run_developer_for_pr(pr_number: int) -> DeveloperResult:
     latest_ai_review = get_latest_ai_review_comment(pr)
     review_feedback = extract_rework_feedback(latest_ai_review)
 
+    context_paths = extract_context_file_paths(issue_body or "")
+    code_context = read_context_files(context_paths)
+
     prompt = build_developer_prompt(
         issue_title=issue_title,
         issue_body=issue_body,
         plan=plan,
         review_feedback=review_feedback,
+        code_context=code_context,
     )
 
     raw, mode = llm_chat(prompt)

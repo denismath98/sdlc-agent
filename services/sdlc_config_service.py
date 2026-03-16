@@ -15,6 +15,10 @@ class CIConfig:
 class ReviewConfig:
     require_ci_success: bool = True
 
+    diff_max_chars: int = 8000
+    issue_max_chars: int = 2000
+    llm_output_max_chars: int = 2500
+
 
 @dataclass
 class SDLCConfig:
@@ -52,6 +56,9 @@ def load_sdlc_config() -> SDLCConfig:
             enable_pytest=bool(ci_data.get("enable_pytest", True)),
         ),
         review=ReviewConfig(
-            require_ci_success=bool(review_data.get("require_ci_success", True)),
+            require_ci_success=review_data.get("require_ci_success", True),
+            diff_max_chars=review_data.get("diff_max_chars", 8000),
+            issue_max_chars=review_data.get("issue_max_chars", 3000),
+            llm_output_max_chars=review_data.get("llm_output_max_chars", 4000),
         ),
     )

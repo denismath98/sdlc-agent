@@ -164,7 +164,11 @@ def evaluate(repo, pr) -> ReviewResult:
             suggestions.append("Ensure PR references an existing Issue.")
 
     ci_state = ci_state_for_pr(repo, pr)
+
     ci_workflow_name = (os.getenv("CI_WORKFLOW_NAME") or "").strip()
+    ci_workflow_conclusion = (os.getenv("CI_WORKFLOW_CONCLUSION") or "").strip().lower()
+    ci_finished_via_workflow = bool(ci_workflow_conclusion)
+
     if ci_workflow_name:
         suggestions.append(f"CI workflow source: {ci_workflow_name}")
 
@@ -189,17 +193,18 @@ def evaluate(repo, pr) -> ReviewResult:
             suggestions.append("Black log tail:")
             suggestions.append(tail)
 
-    if not pytest_exit and not black_exit:
-        if ci_state in ("failure", "error") and config.review.require_ci_success:
+    if not pytest_exit and not black_exit and config.review.require_ci_success:
+        if ci_state in ("failure", "error"):
             issues.append(f"CI is failing ({ci_state}).")
             suggestions.append("Fix CI failures and push updates.")
-        elif ci_state == "pending" and config.review.require_ci_success:
+
+        elif ci_state == "pending" and not ci_finished_via_workflow:
             issues.append(
                 "CI is still running (pending). Final approval is not allowed yet."
             )
             suggestions.append("Wait for CI to finish before approving the PR.")
 
-        elif ci_state is None and config.review.require_ci_success:
+        elif ci_state is None and not ci_finished_via_workflow:
             issues.append("CI status is unknown. Final approval is not allowed yet.")
             suggestions.append(
                 "Ensure CI has started and finished successfully before approval."
@@ -211,8 +216,8 @@ def evaluate(repo, pr) -> ReviewResult:
 
     status = "approved" if not issues else "needs-fix"
 
-    diff_text = collect_pr_diff(pr, max_chars=8000)
-    issue_text = clamp(issue_text, 2000)
+    diff_text = collect_pr_diff(pr, max_chars=config.review.diff_max_chars)
+    issue_text = clamp(issue_text, config.review.issue_max_chars)
 
     prompt = build_reviewer_prompt(issue_text=issue_text, diff_text=diff_text)
 
@@ -223,7 +228,7 @@ def evaluate(repo, pr) -> ReviewResult:
     suggestions.append(f"LLM mode: {llm_mode}")
     if llm_out:
         suggestions.append("LLM output:")
-        suggestions.append(clamp(llm_out, 2500))
+        suggestions.append(clamp(llm_out, config.review.llm_output_max_chars))
     else:
         suggestions.append("LLM produced no output.")
 
